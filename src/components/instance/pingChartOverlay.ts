@@ -14,6 +14,11 @@ export interface PingExtremePoint {
 export interface PingSeriesOverlay {
   color: string;
   lossIndices: number[];
+  /**
+   * 丢包密到几乎全丢时，竖线会把整个绘图区涂成实色反而读不出信息，此时跳过竖线。
+   * 色带不受影响——它画在绘图区之外，整条轨道变红本身就是正确的表达。
+   */
+  suppressLossLines: boolean;
   max: PingExtremePoint | null;
   min: PingExtremePoint | null;
 }
@@ -55,21 +60,49 @@ export function buildPingSeriesOverlay(
   }
 
   const sampled = validCount + lossIndices.length;
-  const suppressLossMarks =
-    sampled >= LOSS_MARK_SUPPRESS_MIN_SAMPLES &&
-    lossIndices.length / sampled > LOSS_MARK_SUPPRESS_RATIO;
 
   return {
     color,
-    lossIndices: suppressLossMarks ? [] : lossIndices,
+    lossIndices,
+    suppressLossLines:
+      sampled >= LOSS_MARK_SUPPRESS_MIN_SAMPLES &&
+      lossIndices.length / sampled > LOSS_MARK_SUPPRESS_RATIO,
     max,
     // 极值相等时只保留 max，避免两个 pin 完全重叠在同一点上。
     min: min != null && max != null && min.index === max.index ? null : min,
   };
 }
 
+// 丢包的两种画法：竖线直接压在曲线上，密集时会糊住图；色带把丢包挪到主绘图区上方
+// 的独立横带里，完全不侵占曲线的视觉空间。线路少、丢包稀疏时竖线更直观，反之用色带。
+export type LossMarkMode = "line" | "band" | "off";
+
 const LOSS_LINE_ALPHA = 0.42;
 const LOSS_LINE_WIDTH = 1;
+
+const BAND_OUTER_MARGIN = 6;
+const BAND_ROW_GAP = 3;
+const BAND_ROW_HEIGHT_MAX = 5;
+const BAND_ROW_HEIGHT_MIN = 2;
+const BAND_TRACK_ALPHA = 0.3;
+const BAND_LOSS_COLOR = "#e5484d";
+const BAND_MAX_HEIGHT = 72;
+
+/** 色带占用的高度(CSS px)，主图的顶部 padding 要按它撑开才不会盖住曲线。 */
+export function lossBandHeight(rowCount: number): number {
+  if (rowCount <= 0) return 0;
+  return Math.min(
+    BAND_MAX_HEIGHT,
+    BAND_OUTER_MARGIN * 2 + rowCount * BAND_ROW_HEIGHT_MAX + (rowCount - 1) * BAND_ROW_GAP,
+  );
+}
+
+// 线路多到撑破高度上限时压缩行高而不是让色带无限长高，图表本身的空间要优先保住。
+function bandRowHeight(rowCount: number): number {
+  if (rowCount <= 0) return 0;
+  const available = BAND_MAX_HEIGHT - BAND_OUTER_MARGIN * 2 - (rowCount - 1) * BAND_ROW_GAP;
+  return Math.max(BAND_ROW_HEIGHT_MIN, Math.min(BAND_ROW_HEIGHT_MAX, available / rowCount));
+}
 const PIN_RADIUS = 9;
 const PIN_TIP = 7;
 const PIN_FILL_ALPHA = 0.55;
@@ -127,27 +160,76 @@ function drawPin(
   ctx.restore();
 }
 
-/** 在 uPlot 的 draw hook 中调用：先画丢包竖线垫底，再画极值 pin 压在最上层。 */
+// 主绘图区上方的丢包色带：每条线路一条横轨，轨道底色用线路自己的颜色(便于和曲线对应)，
+// 探测失败的时刻在轨上打红点。轨道横向与时间轴严格对齐，所以红点的位置可以直接和下方
+// 曲线对照着看。
+function drawLossBand(
+  ctx: CanvasRenderingContext2D,
+  u: uPlot,
+  overlays: readonly PingSeriesOverlay[],
+  ratio: number,
+) {
+  const times = u.data[0];
+  const rowHeight = bandRowHeight(overlays.length) * ratio;
+  const rowGap = BAND_ROW_GAP * ratio;
+  const left = u.bbox.left;
+  const width = u.bbox.width;
+  // 从色带底部(紧贴绘图区)往上排，线路顺序与图例一致。
+  const bandBottom = u.bbox.top - BAND_OUTER_MARGIN * ratio;
+  const dotWidth = Math.max(1.5 * ratio, rowHeight * 0.5);
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(left, 0, width, u.bbox.top);
+  ctx.clip();
+
+  overlays.forEach((overlay, index) => {
+    const top = bandBottom - (overlays.length - index) * rowHeight - (overlays.length - 1 - index) * rowGap;
+
+    ctx.globalAlpha = BAND_TRACK_ALPHA;
+    ctx.fillStyle = overlay.color;
+    ctx.fillRect(left, top, width, rowHeight);
+
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = BAND_LOSS_COLOR;
+    for (const lossIndex of overlay.lossIndices) {
+      const time = times[lossIndex];
+      if (typeof time !== "number") continue;
+      const x = u.valToPos(time, "x", true);
+      ctx.fillRect(x - dotWidth / 2, top, dotWidth, rowHeight);
+    }
+  });
+
+  ctx.restore();
+}
+
+/** 在 uPlot 的 draw hook 中调用：先画丢包标记垫底，再画极值 pin 压在最上层。 */
 export function drawPingOverlay(
   u: uPlot,
   overlays: readonly PingSeriesOverlay[],
-  options: { showLossLines: boolean; showExtremePins: boolean },
+  options: { lossMarkMode: LossMarkMode; showExtremePins: boolean },
 ) {
   if (overlays.length === 0) return;
-  if (!options.showLossLines && !options.showExtremePins) return;
+  if (options.lossMarkMode === "off" && !options.showExtremePins) return;
 
   const ctx = u.ctx;
   const times = u.data[0];
   const ratio = u.bbox.width / Math.max(1, u.over.clientWidth);
+
+  // 色带画在绘图区上方的 padding 里，必须在 clip 之前画，否则会被裁掉。
+  if (options.lossMarkMode === "band") {
+    drawLossBand(ctx, u, overlays, ratio);
+  }
 
   ctx.save();
   ctx.beginPath();
   ctx.rect(u.bbox.left, u.bbox.top, u.bbox.width, u.bbox.height);
   ctx.clip();
 
-  if (options.showLossLines) {
+  if (options.lossMarkMode === "line") {
     ctx.lineWidth = LOSS_LINE_WIDTH * ratio;
     for (const overlay of overlays) {
+      if (overlay.suppressLossLines) continue;
       ctx.save();
       ctx.globalAlpha = LOSS_LINE_ALPHA;
       ctx.strokeStyle = overlay.color;

@@ -384,6 +384,21 @@ export function cutPeakValues<T extends { [key: string]: number | null | undefin
   return result;
 }
 
+/** 一个降采样桶内的原始采样统计，供 tooltip 说明这一格背后到底有多少次探测。 */
+export interface MetricBucketStat {
+  min: number;
+  max: number;
+  avg: number;
+  count: number;
+}
+
+export interface DownsampleResult {
+  times: number[];
+  perTask: Array<Array<number | null | undefined>>;
+  /** 未触发降采样时为 null——此时图上每个点就是一次原始采样，没有"桶"可言。 */
+  buckets: Array<Array<MetricBucketStat | null>> | null;
+}
+
 // 桶内偏离均值超过这个相对比例才判定为「真尖峰」，保峰模式下输出极值而非均值。
 // 调小 → 更多波动被保留（线更跳）；调大 → 只有非常突出的尖峰才显出来。
 const PEAK_PRESERVE_SPIKE_RATIO = 0.3;
@@ -398,14 +413,14 @@ export function downsampleAligned(
   perTask: Array<Array<number | null | undefined>>,
   maxPoints: number,
   preservePeaks = false,
-): { times: number[]; perTask: Array<Array<number | null | undefined>> } {
+): DownsampleResult {
   const length = times.length;
-  if (length <= maxPoints || maxPoints <= 0) return { times, perTask };
+  if (length <= maxPoints || maxPoints <= 0) return { times, perTask, buckets: null };
 
   const min = times[0];
   const max = times[length - 1];
   const span = max - min;
-  if (!(span > 0)) return { times, perTask };
+  if (!(span > 0)) return { times, perTask, buckets: null };
   const bucketDuration = span / maxPoints;
 
   const seriesCount = perTask.length;
@@ -414,13 +429,13 @@ export function downsampleAligned(
   const valueSum = perTask.map(() => new Array<number>(maxPoints).fill(0));
   const valueCount = perTask.map(() => new Array<number>(maxPoints).fill(0));
   const nullCount = perTask.map(() => new Array<number>(maxPoints).fill(0));
-  // 仅保峰模式需要：记录每桶每序列的最大/最小值，用来判断并输出尖峰极值。
-  const valueMax = preservePeaks
-    ? perTask.map(() => new Array<number>(maxPoints).fill(Number.NEGATIVE_INFINITY))
-    : null;
-  const valueMin = preservePeaks
-    ? perTask.map(() => new Array<number>(maxPoints).fill(Number.POSITIVE_INFINITY))
-    : null;
+  // 每桶每序列的极值：保峰模式用它判断并输出尖峰，其余模式用它产出 tooltip 的桶内统计。
+  const valueMax = perTask.map(() =>
+    new Array<number>(maxPoints).fill(Number.NEGATIVE_INFINITY),
+  );
+  const valueMin = perTask.map(() =>
+    new Array<number>(maxPoints).fill(Number.POSITIVE_INFINITY),
+  );
 
   for (let i = 0; i < length; i += 1) {
     let bucket = Math.floor((times[i] - min) / bucketDuration);
@@ -433,8 +448,8 @@ export function downsampleAligned(
       if (typeof value === "number" && Number.isFinite(value)) {
         valueSum[s][bucket] += value;
         valueCount[s][bucket] += 1;
-        if (valueMax && value > valueMax[s][bucket]) valueMax[s][bucket] = value;
-        if (valueMin && value < valueMin[s][bucket]) valueMin[s][bucket] = value;
+        if (value > valueMax[s][bucket]) valueMax[s][bucket] = value;
+        if (value < valueMin[s][bucket]) valueMin[s][bucket] = value;
       } else if (value === null) {
         nullCount[s][bucket] += 1;
       }
@@ -443,20 +458,34 @@ export function downsampleAligned(
 
   const outTimes: number[] = [];
   const outPerTask: Array<Array<number | null | undefined>> = perTask.map(() => []);
+  const outBuckets: Array<Array<MetricBucketStat | null>> = perTask.map(() => []);
   for (let bucket = 0; bucket < maxPoints; bucket += 1) {
     if (timeCount[bucket] === 0) continue; // 跳过没有任何样本的空桶
     outTimes.push(timeSum[bucket] / timeCount[bucket]);
     for (let s = 0; s < seriesCount; s += 1) {
+      const count = valueCount[s][bucket];
+      // 统计只看有效采样，与下面输出的显示值无关：桶里既有丢包又有正常值时，
+      // 线要断开(null)，但"这一格最快/最慢多少"仍然是有意义的信息。
+      outBuckets[s].push(
+        count > 0
+          ? {
+              min: valueMin[s][bucket],
+              max: valueMax[s][bucket],
+              avg: valueSum[s][bucket] / count,
+              count,
+            }
+          : null,
+      );
       if (nullCount[s][bucket] > 0) {
         outPerTask[s].push(null); // 断点优先：桶内有丢包就断开
         continue;
       }
-      if (valueCount[s][bucket] === 0) {
+      if (count === 0) {
         outPerTask[s].push(undefined); // 全 off-phase：跨过、不当断点
         continue;
       }
-      const mean = valueSum[s][bucket] / valueCount[s][bucket];
-      if (!preservePeaks || !valueMax || !valueMin) {
+      const mean = valueSum[s][bucket] / count;
+      if (!preservePeaks) {
         outPerTask[s].push(mean);
         continue;
       }
@@ -470,7 +499,7 @@ export function downsampleAligned(
     }
   }
 
-  return { times: outTimes, perTask: outPerTask };
+  return { times: outTimes, perTask: outPerTask, buckets: outBuckets };
 }
 
 // 按点数的滑动平均：每个数值点取前后各 floor(window/2) 个点取均值。降采样后各时段点数一致，

@@ -63,7 +63,8 @@ export interface ChartTooltipState {
   show: boolean;
   left: number;
   top: number;
-  rows: Array<{ label: string; value: string; color: string }>;
+  /** note 是可选的补充行(如降采样桶内的 min/max/样本数)，不传就只渲染主行。 */
+  rows: Array<{ label: string; value: string; color: string; note?: string }>;
   time: string;
 }
 
@@ -282,7 +283,8 @@ export function buildChartTooltipHooks({
       containerHeight: bbox.height,
       anchorX,
       anchorY,
-      rowCount: rows.length,
+      // 带 note 的行会多占一行高度，否则浮层会在贴近边缘时算错翻转方向。
+      rowCount: rows.length + rows.filter((row) => row.note).length,
       estimatedWidth,
     });
     setTooltip({

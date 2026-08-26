@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import UplotReact from "uplot-react";
 import type uPlot from "uplot";
-import { Eye, EyeOff, RefreshCw } from "lucide-react";
+import { ChevronLeft, ChevronRight, Eye, EyeOff, RefreshCw } from "lucide-react";
 import { usePingRecords } from "@/hooks/useRecords";
 import { InstancePanel, InstanceChartLoading } from "./InstancePanel";
 import {
@@ -13,7 +13,7 @@ import {
   useResponsiveChartSize,
   type ChartTooltipState,
 } from "./chartShared";
-import { ChartTooltip, SwitchToggle } from "./ChartParts";
+import { ChartTooltip, CycleToggle, SwitchToggle } from "./ChartParts";
 import { ChartRangeSlider, type ChartRangePreviewSeries } from "./ChartRangeSlider";
 import { PingTaskStatsPopover } from "./PingTaskStatsPopover";
 import {
@@ -22,10 +22,13 @@ import {
   downsampleAligned,
   insertMetricGapSentinels,
   smoothByCount,
+  type MetricBucketStat,
 } from "./chartData";
 import {
   buildPingSeriesOverlay,
   drawPingOverlay,
+  lossBandHeight,
+  type LossMarkMode,
   type PingSeriesOverlay,
 } from "./pingChartOverlay";
 import {
@@ -40,6 +43,8 @@ import { latencyHeatColor, lossHeatColor } from "@/utils/metricTone";
 import { historyChartRangeSeconds, historyCoverageLabel } from "@/utils/historyRange";
 import { resolvePingChartInterval, resolvePingSampleCounts } from "@/utils/pingMetrics";
 import { usePreferences } from "@/hooks/usePreferences";
+import { useMediaQuery } from "@/hooks/useMediaQuery";
+import { MOBILE_VIEWPORT_QUERY } from "@/utils/mediaQuery";
 import type { PingRecord, PingTaskStats } from "@/types/komari";
 import type { TimedMetricPoint } from "./chartData";
 
@@ -110,7 +115,53 @@ export function summarizePingRecords(records: PingRecord[]) {
 }
 
 const EMPTY_PING_STATS: PingTaskStats[] = [];
-const MAX_RENDER_POINTS = 160;
+
+// 采样档位：点越多细节越全但线越跳、渲染越重。标准档是原来的固定值，
+// 全量给"想看清每一次抖动"的场景，快速给长区间或线路特别多的场景。
+type SampleTier = "full" | "standard" | "fast";
+const SAMPLE_TIERS: readonly { value: SampleTier; label: string; points: number }[] = [
+  { value: "full", label: "全量", points: 480 },
+  { value: "standard", label: "标准", points: 160 },
+  { value: "fast", label: "快速", points: 80 },
+];
+const LOSS_MARK_MODES: readonly { value: LossMarkMode; label: string }[] = [
+  { value: "band", label: "色带" },
+  { value: "line", label: "竖线" },
+  { value: "off", label: "隐藏" },
+];
+
+// 纵轴起点。从 0 起能看出延迟的绝对量级——基线低的线路就是贴着底的一条平线，
+// 尖峰才会窜起来；自适应放大到 [min, max] 区间看细节，但基线稳定时几毫秒的正常抖动
+// 也会被放大成剧烈起伏，容易误判成线路不稳。
+type YAxisMode = "zero" | "auto";
+const Y_AXIS_MODES: readonly { value: YAxisMode; label: string }[] = [
+  { value: "zero", label: "从0起" },
+  { value: "auto", label: "自适应" },
+];
+// 从 0 起时顶部留的余量，只为让最高的尖峰不贴着上边框。
+const Y_AXIS_ZERO_HEADROOM = 1.04;
+// 顶部 padding 的基础值，色带模式下还要再加上色带自身的高度。
+const CHART_PADDING_TOP = 10;
+// 线路多到图例要换好几行时改成翻页，避免图例把图表挤下去。
+const LEGEND_PAGE_SIZE_DESKTOP = 6;
+const LEGEND_PAGE_SIZE_MOBILE = 3;
+
+/** 图例分页。条目不超过一页时原样返回并标记 paginated=false，由调用方决定不渲染翻页控件。 */
+export function paginateLegend<T>(items: readonly T[], pageSize: number, page: number) {
+  if (pageSize <= 0 || items.length <= pageSize) {
+    return { items: [...items], page: 0, pageCount: 1, paginated: false };
+  }
+  const pageCount = Math.ceil(items.length / pageSize);
+  // 线路减少后停留的页码可能已经越界，这里收敛而不是让调用方拿到空页。
+  const safePage = Math.min(Math.max(page, 0), pageCount - 1);
+  const start = safePage * pageSize;
+  return {
+    items: items.slice(start, start + pageSize),
+    page: safePage,
+    pageCount,
+    paginated: true,
+  };
+}
 // 1 即关闭平滑(smoothByCount 对 <=1 原样返回);保留常量便于调参,非削峰模式当前不平滑。
 const SMOOTH_WINDOW_POINTS = 1;
 const SMOOTH_WINDOW_POINTS_PEAK = 13;
@@ -138,8 +189,11 @@ export function PingChart({
   const [hiddenTasks, setHiddenTasks] = useState<Set<number>>(new Set());
   const [connectNulls, setConnectNulls] = useState(false);
   const [cutPeak, setCutPeak] = useState(false);
-  const [showLossLines, setShowLossLines] = useState(true);
+  const [lossMarkMode, setLossMarkMode] = useState<LossMarkMode>("band");
   const [showExtremePins, setShowExtremePins] = useState(true);
+  const [sampleTier, setSampleTier] = useState<SampleTier>("standard");
+  const [yAxisMode, setYAxisMode] = useState<YAxisMode>("zero");
+  const [legendPage, setLegendPage] = useState(0);
   const [zoomWindow, setZoomWindow] = useState<ChartZoomWindow>(FULL_ZOOM_WINDOW);
   const chartRef = useRef<uPlot.AlignedData>([[]]);
   // 缩放、覆盖层和丢包率都通过 ref 喂给 uPlot，让 options 对象保持稳定引用——
@@ -150,7 +204,9 @@ export function PingChart({
   const yRangeRef = useRef<[number, number]>([0, 100]);
   const overlaysRef = useRef<PingSeriesOverlay[]>([]);
   const lossByTaskRef = useRef<Map<number, number>>(new Map());
-  const overlayFlagsRef = useRef({ showLossLines, showExtremePins });
+  const overlayFlagsRef = useRef({ lossMarkMode, showExtremePins });
+  const yAxisModeRef = useRef<YAxisMode>(yAxisMode);
+  const bucketsRef = useRef<Array<Array<MetricBucketStat | null>> | null>(null);
   const applyZoomRef = useRef<(next: ChartZoomWindow) => void>(() => {});
   const [tooltip, setTooltip] = useState<ChartTooltipState>({
     show: false,
@@ -160,6 +216,9 @@ export function PingChart({
     time: "",
   });
   const isDark = resolvedAppearance === "dark";
+  const isMobileViewport = useMediaQuery(MOBILE_VIEWPORT_QUERY);
+  const maxRenderPoints =
+    SAMPLE_TIERS.find((tier) => tier.value === sampleTier)?.points ?? 160;
   // API 顺序与后台任务权重一致，响应本身不一定包含可重排的权重。
   const tasks = useMemo(() => [...(data?.tasks ?? [])], [data]);
   const taskLabels = useMemo(() => {
@@ -197,6 +256,7 @@ export function PingChart({
 
   useEffect(() => {
     setHiddenTasks(new Set());
+    setLegendPage(0);
   }, [uuid]);
 
   useEffect(() => {
@@ -220,7 +280,7 @@ export function PingChart({
     [data],
   );
 
-  const chart = useMemo(() => {
+  const chartBundle = useMemo(() => {
     if (!data?.records.length || !tasks.length) return null;
     const pointMap = new Map<number, TimedMetricPoint>();
     const taskIntervals = tasks
@@ -269,18 +329,26 @@ export function PingChart({
       chartPoints.map((point) => point[taskKey]),
     );
 
-    const reduced = downsampleAligned(times, perTask, MAX_RENDER_POINTS, !cutPeak);
+    const reduced = downsampleAligned(times, perTask, maxRenderPoints, !cutPeak);
     const smoothed = smoothByCount(
       reduced.perTask,
       cutPeak ? SMOOTH_WINDOW_POINTS_PEAK : SMOOTH_WINDOW_POINTS,
     );
 
-    return [reduced.times, ...smoothed] as uPlot.AlignedData;
-  }, [cutPeak, data, sortedRecords, taskKeySet, taskKeys, tasks]);
+    return {
+      data: [reduced.times, ...smoothed] as uPlot.AlignedData,
+      buckets: reduced.buckets,
+    };
+  }, [cutPeak, data, maxRenderPoints, sortedRecords, taskKeySet, taskKeys, tasks]);
+
+  const chart = chartBundle?.data ?? null;
 
   useEffect(() => {
     if (chart) chartRef.current = chart;
   }, [chart]);
+
+  // 桶统计走 ref：它只在 tooltip 现算时被读到，不该让整个 options 因它重建。
+  bucketsRef.current = chartBundle?.buckets ?? null;
 
   const requestedXRange = useMemo(() => historyChartRangeSeconds(data), [data]);
   const coverageMeta = useMemo(() => {
@@ -362,25 +430,29 @@ export function PingChart({
       }
     }
     if (min === Number.POSITIVE_INFINITY) return [0, 100];
+    if (yAxisMode === "zero") {
+      return [0, Math.max(max * Y_AXIS_ZERO_HEADROOM, 1)];
+    }
     if (min === max) {
       const pad = Math.max(5, min * 0.1);
       return [Math.max(0, min - pad), max + pad];
     }
     const pad = Math.max(5, (max - min) * 0.12);
     return [Math.max(0, min - pad), max + pad];
-  }, [chart, tasks, visibleIndexRange, visibleTaskIds]);
+  }, [chart, tasks, visibleIndexRange, visibleTaskIds, yAxisMode]);
 
   // 这些 ref 必须在 render 期间对齐：uPlot 挂载那一帧就会调用 scales 的 range() 和 draw hook，
   // 放到 effect 里赋值会晚一帧，首帧会用上一轮(甚至初始占位)的区间和覆盖层画一次。
   overlaysRef.current = overlays;
-  overlayFlagsRef.current = { showLossLines, showExtremePins };
+  overlayFlagsRef.current = { lossMarkMode, showExtremePins };
   fullXRangeRef.current = fullXRange;
+  yAxisModeRef.current = yAxisMode;
   if (zoomedXRange) xRangeRef.current = zoomedXRange;
   yRangeRef.current = yRange;
 
   useEffect(() => {
     plotRef.current?.redraw();
-  }, [overlays, showExtremePins, showLossLines]);
+  }, [overlays, showExtremePins, lossMarkMode]);
 
   useEffect(() => {
     const plot = plotRef.current;
@@ -409,7 +481,8 @@ export function PingChart({
     const tooltipHooks = buildChartTooltipHooks({
       dataRef: chartRef,
       rangeHours: hours,
-      estimatedWidth: 196,
+      // 带桶统计的行比原来长不少，宽度估小了浮层会在贴近右边缘时算错翻转位置。
+      estimatedWidth: 240,
       setTooltip,
       buildRows: (idx) =>
         visibleTasks
@@ -418,6 +491,7 @@ export function PingChart({
             const raw = chartRef.current[taskIndex + 1]?.[idx] as number | null | undefined;
             return {
               taskId: task.id,
+              taskIndex,
               label: taskLabels.get(task.id) ?? `任务 #${task.id}`,
               raw: typeof raw === "number" && Number.isFinite(raw) ? raw : null,
               color: taskColors.get(task.id) ?? colorForSeries(taskIndex, tasks.length),
@@ -428,19 +502,32 @@ export function PingChart({
             if (b.raw == null) return -1;
             return b.raw - a.raw;
           })
-          .map(({ label, raw, color, taskId }) => {
+          .map(({ label, raw, color, taskId, taskIndex }) => {
             // 对标哪吒服务监控图的图例格式「名称 丢包%: 延迟 ms」，
             // 悬停时不用回头去看图例就知道这条线当前的健康度。
             const loss = lossByTaskRef.current.get(taskId);
+            const bucket = bucketsRef.current?.[taskIndex]?.[idx] ?? null;
             return {
               label: loss == null ? label : `${label} ${loss.toFixed(1)}%`,
               value: raw == null ? "—" : `${raw.toFixed(1)} ms`,
               color,
+              // 这一格背后压了多次探测时才有意义：单次采样的 min/max/avg 就是它自己。
+              note:
+                bucket && bucket.count > 1
+                  ? `均 ${bucket.avg.toFixed(1)} / 低 ${bucket.min.toFixed(1)} / 高 ${bucket.max.toFixed(1)} ms · ${bucket.count} 次`
+                  : undefined,
             };
           }),
     });
     return {
-      padding: [10, 14, 12, 2],
+      // 色带占用顶部 padding，绘图区要相应下移，否则色带会盖在曲线上。
+      padding: [
+        CHART_PADDING_TOP +
+          (lossMarkMode === "band" ? lossBandHeight(visibleTasks.length) : 0),
+        14,
+        12,
+        2,
+      ],
       // setScale: false —— 拖拽出的选区交给 setSelect hook 换算成缩放窗口，
       // 由窗口统一驱动 x scale，避免 uPlot 自缩放与滑块两套状态打架。
       // dist 要求先拖够 8px 才算选区，否则想点一下图表却抖了两像素就会意外缩放。
@@ -463,7 +550,12 @@ export function PingChart({
           grid: { stroke: grid, width: 1 },
           ticks: { stroke: grid },
           size: 54,
-          values: (_self, splits) => splits.map((value) => (value === 0 ? "" : `${Math.round(value)} ms`)),
+          // 自适应模式下轴基本不会正好落在 0，出现 0 说明贴着底、标签会和 x 轴挤在一起，
+          // 所以隐藏；从 0 起时 0 是有意义的基准刻度，要显示。
+          values: (_self, splits) =>
+            splits.map((value) =>
+              value === 0 && yAxisModeRef.current !== "zero" ? "" : `${Math.round(value)} ms`,
+            ),
         },
       ],
       series: [
@@ -505,7 +597,8 @@ export function PingChart({
         ],
       },
     };
-  }, [chart, connectNulls, hiddenTasks, hours, isDark, taskColors, taskIndexById, taskLabels, tasks, visibleTasks]);
+    // lossMarkMode 只在这里影响 padding；覆盖层本身走 ref，不需要重建图表。
+  }, [chart, connectNulls, hiddenTasks, hours, isDark, lossMarkMode, taskColors, taskIndexById, taskLabels, tasks, visibleTasks]);
 
   const options = useMemo<uPlot.Options | null>(
     () => (baseOptions ? { ...baseOptions, width: w, height: h } : null),
@@ -588,6 +681,12 @@ export function PingChart({
     });
   }, [chart, taskColors, taskIndexById, tasks.length, visibleTasks]);
 
+  const legend = paginateLegend(
+    taskStats,
+    isMobileViewport ? LEGEND_PAGE_SIZE_MOBILE : LEGEND_PAGE_SIZE_DESKTOP,
+    legendPage,
+  );
+
   const refetchAll = () => {
     void refetchRecords();
   };
@@ -651,11 +750,26 @@ export function PingChart({
           onToggle={() => setConnectNulls((value) => !value)}
           title="关闭：如实显示中断/丢包断点；开启：跨过所有空缺连成完整曲线（更好看，但看不出掉线）。注：偶尔漏一两次采样的小空缺始终自动桥接，不受此开关影响。"
         />
-        <SwitchToggle
-          label="丢包竖线"
-          active={showLossLines}
-          onToggle={() => setShowLossLines((value) => !value)}
-          title="在每次探测失败的时刻立一条同色竖线，一眼看出丢包集中在哪些时段"
+        <CycleToggle
+          label="丢包"
+          options={LOSS_MARK_MODES}
+          value={lossMarkMode}
+          onChange={setLossMarkMode}
+          title="色带：丢包画在图上方的独立横带里，不遮挡曲线；竖线：在丢包时刻直接立一条同色竖线；隐藏：不标记"
+        />
+        <CycleToggle
+          label="采样"
+          options={SAMPLE_TIERS}
+          value={sampleTier}
+          onChange={setSampleTier}
+          title="图上保留多少个数据点。全量最细但线更跳，快速最平滑但会吞掉短暂尖峰"
+        />
+        <CycleToggle
+          label="纵轴"
+          options={Y_AXIS_MODES}
+          value={yAxisMode}
+          onChange={setYAxisMode}
+          title="从0起：看延迟的绝对量级，线路稳定时就是一条贴底的平线；自适应：放大到实际区间看细节，但正常的小幅抖动也会被放大"
         />
         <SwitchToggle
           label="极值标记"
@@ -680,7 +794,7 @@ export function PingChart({
       </div>
 
       <div className="instance-ping-tasks">
-        {taskStats.map((task) => {
+        {legend.items.map((task) => {
           const visible = !hiddenTasks.has(task.id);
           const label = taskLabels.get(task.id) ?? `任务 #${task.id}`;
           return (
@@ -737,6 +851,31 @@ export function PingChart({
             </div>
           );
         })}
+        {legend.paginated && (
+          <div className="instance-legend-pager">
+            <button
+              type="button"
+              className="instance-legend-pager-button"
+              onClick={() => setLegendPage(legend.page - 1)}
+              disabled={legend.page === 0}
+              aria-label="上一页线路"
+            >
+              <ChevronLeft size={14} aria-hidden />
+            </button>
+            <span className="instance-legend-pager-count">
+              {legend.page + 1}/{legend.pageCount}
+            </span>
+            <button
+              type="button"
+              className="instance-legend-pager-button"
+              onClick={() => setLegendPage(legend.page + 1)}
+              disabled={legend.page >= legend.pageCount - 1}
+              aria-label="下一页线路"
+            >
+              <ChevronRight size={14} aria-hidden />
+            </button>
+          </div>
+        )}
       </div>
 
       <div ref={chartSizeRef} className="instance-uplot-wrap is-large">

@@ -63,6 +63,7 @@ function fakeContext() {
     beginPath: record("beginPath"),
     closePath: record("closePath"),
     rect: record("rect"),
+    fillRect: record("fillRect"),
     clip: record("clip"),
     moveTo: record("moveTo"),
     lineTo: record("lineTo"),
@@ -98,7 +99,7 @@ describe("drawPingOverlay", () => {
     const overlay = buildPingSeriesOverlay([5, null, 8, null], "#f00");
 
     drawPingOverlay(fakePlot(times, ctx), [overlay], {
-      showLossLines: true,
+      lossMarkMode: "line",
       showExtremePins: false,
     });
 
@@ -113,7 +114,7 @@ describe("drawPingOverlay", () => {
     const overlay = buildPingSeriesOverlay([5.4, 120.6, 60, 30], "#f00");
 
     drawPingOverlay(fakePlot(times, ctx), [overlay], {
-      showLossLines: false,
+      lossMarkMode: "off",
       showExtremePins: true,
     });
 
@@ -126,7 +127,7 @@ describe("drawPingOverlay", () => {
     const overlay = buildPingSeriesOverlay([5, null], "#f00");
 
     drawPingOverlay(fakePlot(times, ctx), [overlay], {
-      showLossLines: false,
+      lossMarkMode: "off",
       showExtremePins: false,
     });
 
@@ -137,11 +138,61 @@ describe("drawPingOverlay", () => {
     const ctx = fakeContext();
 
     drawPingOverlay(fakePlot(times, ctx), [] as PingSeriesOverlay[], {
-      showLossLines: true,
+      lossMarkMode: "line",
       showExtremePins: true,
     });
 
     expect(ctx.calls).toHaveLength(0);
+  });
+
+  it("色带模式给每条线路画一条轨道，并在丢包处补红点", () => {
+    const ctx = fakeContext();
+    const first = buildPingSeriesOverlay([5, null, 8, null], "#f00");
+    const second = buildPingSeriesOverlay([9, 9, 9, 9], "#00f");
+
+    drawPingOverlay(fakePlot(times, ctx), [first, second], {
+      lossMarkMode: "band",
+      showExtremePins: false,
+    });
+
+    // 2 条轨道 + first 的 2 个丢包点
+    expect(callsOf(ctx, "fillRect")).toHaveLength(4);
+    expect(callsOf(ctx, "moveTo")).toHaveLength(0);
+  });
+
+  it("色带不受竖线抑制影响：几乎全丢时仍然逐点画红块", () => {
+    const ctx = fakeContext();
+    const overlay = buildPingSeriesOverlay(
+      Array.from({ length: 20 }, () => null),
+      "#f00",
+    );
+    const plotTimes = Array.from({ length: 20 }, (_, index) => index);
+
+    expect(overlay.suppressLossLines).toBe(true);
+
+    drawPingOverlay(fakePlot(plotTimes, ctx), [overlay], {
+      lossMarkMode: "band",
+      showExtremePins: false,
+    });
+
+    // 1 条轨道 + 20 个丢包点
+    expect(callsOf(ctx, "fillRect")).toHaveLength(21);
+  });
+
+  it("竖线模式在几乎全丢时跳过该线路，避免涂实绘图区", () => {
+    const ctx = fakeContext();
+    const overlay = buildPingSeriesOverlay(
+      Array.from({ length: 20 }, () => null),
+      "#f00",
+    );
+    const plotTimes = Array.from({ length: 20 }, (_, index) => index);
+
+    drawPingOverlay(fakePlot(plotTimes, ctx), [overlay], {
+      lossMarkMode: "line",
+      showExtremePins: false,
+    });
+
+    expect(callsOf(ctx, "moveTo")).toHaveLength(0);
   });
 
   it("save/restore 成对出现，不把裁剪或透明度泄漏给后续绘制", () => {
@@ -149,7 +200,7 @@ describe("drawPingOverlay", () => {
     const overlay = buildPingSeriesOverlay([5, null, 90], "#f00");
 
     drawPingOverlay(fakePlot(times, ctx), [overlay], {
-      showLossLines: true,
+      lossMarkMode: "line",
       showExtremePins: true,
     });
 

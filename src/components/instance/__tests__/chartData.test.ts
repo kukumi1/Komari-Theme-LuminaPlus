@@ -220,6 +220,42 @@ describe("insertMetricGapSentinels — three-state ping semantics", () => {
   });
 });
 
+describe("downsampleAligned 的桶内统计", () => {
+  it("给每个桶产出有效采样的 min/max/avg 与次数", () => {
+    const out = downsampleAligned([0, 10, 20, 30], [[10, 30, 14, 16]], 2);
+
+    expect(out.buckets?.[0][0]).toEqual({ min: 10, max: 30, avg: 20, count: 2 });
+    expect(out.buckets?.[0][1]).toEqual({ min: 14, max: 16, avg: 15, count: 2 });
+  });
+
+  it("桶内混有丢包时线要断开，但统计仍反映那几次成功的探测", () => {
+    const out = downsampleAligned([0, 10, 20, 30], [[10, null, 14, 16]], 2);
+
+    expect(out.perTask[0][0]).toBeNull();
+    expect(out.buckets?.[0][0]).toEqual({ min: 10, max: 10, avg: 10, count: 1 });
+  });
+
+  it("整桶都没有有效采样时统计为 null", () => {
+    const out = downsampleAligned([0, 10, 20, 30], [[undefined, undefined, 14, 16]], 2);
+
+    expect(out.buckets?.[0][0]).toBeNull();
+  });
+
+  it("点数没超过上限、未触发降采样时不产出桶统计", () => {
+    const out = downsampleAligned([0, 10], [[10, 20]], 10);
+
+    expect(out.buckets).toBeNull();
+    expect(out.times).toHaveLength(2);
+  });
+
+  it("保峰模式下显示值取极值，但统计仍是真实的均值", () => {
+    const out = downsampleAligned([0, 10, 20, 30], [[50, 500, 50, 52]], 2, true);
+
+    expect(out.perTask[0][0]).toBe(500);
+    expect(out.buckets?.[0][0]).toEqual({ min: 50, max: 500, avg: 275, count: 2 });
+  });
+});
+
 describe("downsampleAligned", () => {
   it("keeps a real null break even when the same bucket also contains numeric samples", () => {
     const out = downsampleAligned(

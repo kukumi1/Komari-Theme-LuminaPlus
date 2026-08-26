@@ -1544,7 +1544,7 @@ body::after {
   position: absolute;
   z-index: 5;
   min-width: 132px;
-  max-width: 220px;
+  max-width: 264px;
   pointer-events: none;
   border: 1px solid var(--border-strong);
   border-radius: 10px;
@@ -1567,6 +1567,10 @@ body::after {
   font-weight: 600;
 }
 
+.instance-chart-tooltip-entry + .instance-chart-tooltip-entry {
+  margin-top: 3px;
+}
+
 .instance-chart-tooltip-row {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
@@ -1574,6 +1578,15 @@ body::after {
   gap: 6px;
   color: var(--text-secondary);
   font-size: 11px;
+}
+
+/* 桶内统计：跟主行左侧的圆点对齐缩进，视觉上从属于上一行。 */
+.instance-chart-tooltip-note {
+  padding-left: 13px;
+  color: var(--text-tertiary);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 .instance-chart-tooltip-row strong {
@@ -1687,6 +1700,64 @@ body::after {
 
 .instance-ping-task[data-visible="false"] {
   opacity: 0.4;
+}
+
+/* 循环切换按钮：左边是设置名，右边是当前档位。 */
+.instance-cycle-button {
+  gap: 6px;
+}
+
+.instance-cycle-label {
+  color: var(--text-tertiary);
+}
+
+.instance-cycle-value {
+  color: var(--text-primary);
+  font-weight: 700;
+}
+
+/* 图例翻页：线路多到一页放不下时才出现，靠右跟在最后一个 chip 后面。 */
+.instance-legend-pager {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: auto;
+}
+
+.instance-legend-pager-button {
+  display: inline-grid;
+  width: 24px;
+  height: 24px;
+  place-items: center;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-secondary);
+  transition: color 160ms ease, background 160ms ease;
+}
+
+.instance-legend-pager-button:hover:not(:disabled) {
+  background: var(--fill-tertiary);
+  color: var(--text-primary);
+}
+
+.instance-legend-pager-button:disabled {
+  color: var(--text-tertiary);
+  opacity: 0.4;
+}
+
+.instance-legend-pager-button:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 1px;
+}
+
+.instance-legend-pager-count {
+  min-width: 30px;
+  color: var(--text-tertiary);
+  font-size: 11px;
+  font-weight: 600;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
 }
 
 /* 线路统计浮层：原先这些数字塞在原生 title 里，触屏完全看不到。 */

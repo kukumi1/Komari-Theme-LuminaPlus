@@ -24,16 +24,19 @@ describe("buildPingSeriesOverlay", () => {
     expect(overlay.min).toBeNull();
   });
 
-  it("几乎全丢时抑制竖线，避免绘图区被涂满", () => {
+  it("几乎全丢时标记为抑制竖线，但丢包数据本身要保留给色带", () => {
     const values = Array.from({ length: 20 }, () => null);
+    const overlay = buildPingSeriesOverlay(values, "#f00");
 
-    expect(buildPingSeriesOverlay(values, "#f00").lossIndices).toEqual([]);
+    expect(overlay.suppressLossLines).toBe(true);
+    expect(overlay.lossIndices).toHaveLength(20);
   });
 
   it("样本过少时不启用抑制，单次丢包仍要画出来", () => {
     const overlay = buildPingSeriesOverlay([null], "#f00");
 
     expect(overlay.lossIndices).toEqual([0]);
+    expect(overlay.suppressLossLines).toBe(false);
   });
 
   it("限定区间时只统计区间内的点", () => {
