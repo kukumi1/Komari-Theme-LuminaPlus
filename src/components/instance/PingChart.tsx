@@ -163,6 +163,22 @@ export function legendCollapseGeometry(
   // 留 1px 容差：子像素行高下 contentHeight 常比理论值大零点几，不该因此冒出收起按钮。
   return { overflows: contentHeight > collapsedHeight + 1, collapsedHeight };
 }
+/**
+ * 丢弃已经不存在的线路的隐藏状态，保持引用不变以免触发无谓重渲染。
+ *
+ * tasks 为空时原样返回：切换时间范围会换 queryKey，新数据到达前 tasks 是空数组，
+ * 那是"还没加载"而不是"任务都被删了"——按后者处理会把用户选好的筛选一起清掉。
+ */
+export function pruneHiddenTasks<T extends { id: number }>(
+  hidden: Set<number>,
+  tasks: readonly T[],
+): Set<number> {
+  if (tasks.length === 0 || hidden.size === 0) return hidden;
+  const validIds = new Set(tasks.map((task) => task.id));
+  const next = new Set([...hidden].filter((taskId) => validIds.has(taskId)));
+  return next.size === hidden.size ? hidden : next;
+}
+
 // 1 即关闭平滑(smoothByCount 对 <=1 原样返回);保留常量便于调参,非削峰模式当前不平滑。
 const SMOOTH_WINDOW_POINTS = 1;
 const SMOOTH_WINDOW_POINTS_PEAK = 13;
@@ -263,11 +279,7 @@ export function PingChart({
   }, [uuid]);
 
   useEffect(() => {
-    setHiddenTasks((prev) => {
-      const validTaskIds = new Set(tasks.map((task) => task.id));
-      const next = new Set([...prev].filter((taskId) => validTaskIds.has(taskId)));
-      return next.size === prev.size ? prev : next;
-    });
+    setHiddenTasks((prev) => pruneHiddenTasks(prev, tasks));
   }, [tasks]);
 
   // 只依赖 data:切换削峰等开关时不重跑解析/排序。
