@@ -1716,48 +1716,22 @@ body::after {
   font-weight: 700;
 }
 
-/* 图例翻页：线路多到一页放不下时才出现，靠右跟在最后一个 chip 后面。 */
-.instance-legend-pager {
-  display: inline-flex;
-  align-items: center;
-  gap: 2px;
-  margin-left: auto;
+/* 图例收起：高度由 JS 按实测行高下发，这里只负责裁掉超出部分。 */
+.instance-ping-tasks[data-collapsed="true"] {
+  overflow: hidden;
 }
 
-.instance-legend-pager-button {
-  display: inline-grid;
-  width: 24px;
-  height: 24px;
-  place-items: center;
-  border: 0;
-  border-radius: 7px;
-  background: transparent;
-  color: var(--text-secondary);
-  transition: color 160ms ease, background 160ms ease;
+/* 收起入口独立成行右对齐，不进图例的 flex 流——放进去会在 chip 正好填满一行时
+   被挤到下一行并留下整行空白（分页按钮当初就是栽在这上面）。 */
+.instance-legend-toggle-row {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 6px;
 }
 
-.instance-legend-pager-button:hover:not(:disabled) {
-  background: var(--fill-tertiary);
-  color: var(--text-primary);
-}
-
-.instance-legend-pager-button:disabled {
-  color: var(--text-tertiary);
-  opacity: 0.4;
-}
-
-.instance-legend-pager-button:focus-visible {
-  outline: 2px solid var(--ring);
-  outline-offset: 1px;
-}
-
-.instance-legend-pager-count {
-  min-width: 30px;
-  color: var(--text-tertiary);
+.instance-legend-toggle {
+  gap: 5px;
   font-size: 11px;
-  font-weight: 600;
-  text-align: center;
-  font-variant-numeric: tabular-nums;
 }
 
 /* 线路统计浮层：原先这些数字塞在原生 title 里，触屏完全看不到。 */

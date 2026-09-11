@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import UplotReact from "uplot-react";
 import type uPlot from "uplot";
-import { ChevronLeft, ChevronRight, Eye, EyeOff, RefreshCw } from "lucide-react";
+import { ChevronDown, ChevronUp, Eye, EyeOff, RefreshCw } from "lucide-react";
 import { usePingRecords } from "@/hooks/useRecords";
 import { InstancePanel, InstanceChartLoading } from "./InstancePanel";
 import {
@@ -43,8 +43,6 @@ import { latencyHeatColor, lossHeatColor } from "@/utils/metricTone";
 import { historyChartRangeSeconds, historyCoverageLabel } from "@/utils/historyRange";
 import { resolvePingChartInterval, resolvePingSampleCounts } from "@/utils/pingMetrics";
 import { usePreferences } from "@/hooks/usePreferences";
-import { useMediaQuery } from "@/hooks/useMediaQuery";
-import { MOBILE_VIEWPORT_QUERY } from "@/utils/mediaQuery";
 import type { PingRecord, PingTaskStats } from "@/types/komari";
 import type { TimedMetricPoint } from "./chartData";
 
@@ -142,25 +140,28 @@ const Y_AXIS_MODES: readonly { value: YAxisMode; label: string }[] = [
 const Y_AXIS_ZERO_HEADROOM = 1.04;
 // 顶部 padding 的基础值，色带模式下还要再加上色带自身的高度。
 const CHART_PADDING_TOP = 10;
-// 线路多到图例要换好几行时改成翻页，避免图例把图表挤下去。
-const LEGEND_PAGE_SIZE_DESKTOP = 6;
-const LEGEND_PAGE_SIZE_MOBILE = 3;
+// 图例一律铺开显示，保证图上每条线都能在图例里找到对应。只有铺开后超过这个行数
+// 才给一个收起入口，免得线路特别多时把图表挤到屏幕外。
+const LEGEND_COLLAPSED_ROWS = 2;
+const LEGEND_ROW_GAP = 8;
 
-/** 图例分页。条目不超过一页时原样返回并标记 paginated=false，由调用方决定不渲染翻页控件。 */
-export function paginateLegend<T>(items: readonly T[], pageSize: number, page: number) {
-  if (pageSize <= 0 || items.length <= pageSize) {
-    return { items: [...items], page: 0, pageCount: 1, paginated: false };
+/**
+ * 图例折叠的几何计算。rowHeight 由实际渲染的 chip 测得(字号、缩放都会影响它)，
+ * 没测到时返回 overflows=false，让图例保持完全铺开——宁可高一点，也不要因为算错高度
+ * 把内容切掉半行。
+ */
+export function legendCollapseGeometry(
+  contentHeight: number,
+  rowHeight: number,
+  maxRows = LEGEND_COLLAPSED_ROWS,
+  rowGap = LEGEND_ROW_GAP,
+): { overflows: boolean; collapsedHeight: number } {
+  if (!(rowHeight > 0) || !(contentHeight > 0) || maxRows <= 0) {
+    return { overflows: false, collapsedHeight: 0 };
   }
-  const pageCount = Math.ceil(items.length / pageSize);
-  // 线路减少后停留的页码可能已经越界，这里收敛而不是让调用方拿到空页。
-  const safePage = Math.min(Math.max(page, 0), pageCount - 1);
-  const start = safePage * pageSize;
-  return {
-    items: items.slice(start, start + pageSize),
-    page: safePage,
-    pageCount,
-    paginated: true,
-  };
+  const collapsedHeight = rowHeight * maxRows + rowGap * (maxRows - 1);
+  // 留 1px 容差：子像素行高下 contentHeight 常比理论值大零点几，不该因此冒出收起按钮。
+  return { overflows: contentHeight > collapsedHeight + 1, collapsedHeight };
 }
 // 1 即关闭平滑(smoothByCount 对 <=1 原样返回);保留常量便于调参,非削峰模式当前不平滑。
 const SMOOTH_WINDOW_POINTS = 1;
@@ -193,7 +194,10 @@ export function PingChart({
   const [showExtremePins, setShowExtremePins] = useState(true);
   const [sampleTier, setSampleTier] = useState<SampleTier>("standard");
   const [yAxisMode, setYAxisMode] = useState<YAxisMode>("zero");
-  const [legendPage, setLegendPage] = useState(0);
+  const [legendCollapsed, setLegendCollapsed] = useState(false);
+  const [legendMetrics, setLegendMetrics] = useState({ contentHeight: 0, rowHeight: 0 });
+  const legendRef = useRef<HTMLDivElement>(null);
+  const legendRegionId = useId();
   const [zoomWindow, setZoomWindow] = useState<ChartZoomWindow>(FULL_ZOOM_WINDOW);
   const chartRef = useRef<uPlot.AlignedData>([[]]);
   // 缩放、覆盖层和丢包率都通过 ref 喂给 uPlot，让 options 对象保持稳定引用——
@@ -216,7 +220,6 @@ export function PingChart({
     time: "",
   });
   const isDark = resolvedAppearance === "dark";
-  const isMobileViewport = useMediaQuery(MOBILE_VIEWPORT_QUERY);
   const maxRenderPoints =
     SAMPLE_TIERS.find((tier) => tier.value === sampleTier)?.points ?? 160;
   // API 顺序与后台任务权重一致，响应本身不一定包含可重排的权重。
@@ -256,7 +259,7 @@ export function PingChart({
 
   useEffect(() => {
     setHiddenTasks(new Set());
-    setLegendPage(0);
+    setLegendCollapsed(false);
   }, [uuid]);
 
   useEffect(() => {
@@ -681,11 +684,40 @@ export function PingChart({
     });
   }, [chart, taskColors, taskIndexById, tasks.length, visibleTasks]);
 
-  const legend = paginateLegend(
-    taskStats,
-    isMobileViewport ? LEGEND_PAGE_SIZE_MOBILE : LEGEND_PAGE_SIZE_DESKTOP,
-    legendPage,
+  // 收起时容器被 max-height 限制，ResizeObserver 不会再因内容换行而触发，所以额外挂 window
+  // resize：窗口变窄导致图例多占一行时，收起态下也要重新判断还需不需要收起入口。
+  useEffect(() => {
+    const container = legendRef.current;
+    if (!container) return;
+    const measure = () => {
+      const firstChip = container.querySelector<HTMLElement>(".instance-ping-task");
+      const next = {
+        contentHeight: container.scrollHeight,
+        rowHeight: firstChip?.offsetHeight ?? 0,
+      };
+      setLegendMetrics((prev) =>
+        prev.contentHeight === next.contentHeight && prev.rowHeight === next.rowHeight
+          ? prev
+          : next,
+      );
+    };
+    measure();
+    window.addEventListener("resize", measure);
+    const observer =
+      typeof ResizeObserver === "undefined" ? null : new ResizeObserver(measure);
+    observer?.observe(container);
+    return () => {
+      window.removeEventListener("resize", measure);
+      observer?.disconnect();
+    };
+  }, [taskStats.length]);
+
+  const legendGeometry = legendCollapseGeometry(
+    legendMetrics.contentHeight,
+    legendMetrics.rowHeight,
   );
+  // 线路减少到放得下之后，收起状态自动失效——不必额外 effect 去同步它。
+  const legendIsCollapsed = legendCollapsed && legendGeometry.overflows;
 
   const refetchAll = () => {
     void refetchRecords();
@@ -793,8 +825,16 @@ export function PingChart({
         </button>
       </div>
 
-      <div className="instance-ping-tasks">
-        {legend.items.map((task) => {
+      <div
+        ref={legendRef}
+        id={legendRegionId}
+        className="instance-ping-tasks"
+        data-collapsed={legendIsCollapsed ? "true" : "false"}
+        style={
+          legendIsCollapsed ? { maxHeight: legendGeometry.collapsedHeight } : undefined
+        }
+      >
+        {taskStats.map((task) => {
           const visible = !hiddenTasks.has(task.id);
           const label = taskLabels.get(task.id) ?? `任务 #${task.id}`;
           return (
@@ -851,32 +891,31 @@ export function PingChart({
             </div>
           );
         })}
-        {legend.paginated && (
-          <div className="instance-legend-pager">
-            <button
-              type="button"
-              className="instance-legend-pager-button"
-              onClick={() => setLegendPage(legend.page - 1)}
-              disabled={legend.page === 0}
-              aria-label="上一页线路"
-            >
-              <ChevronLeft size={14} aria-hidden />
-            </button>
-            <span className="instance-legend-pager-count">
-              {legend.page + 1}/{legend.pageCount}
-            </span>
-            <button
-              type="button"
-              className="instance-legend-pager-button"
-              onClick={() => setLegendPage(legend.page + 1)}
-              disabled={legend.page >= legend.pageCount - 1}
-              aria-label="下一页线路"
-            >
-              <ChevronRight size={14} aria-hidden />
-            </button>
-          </div>
-        )}
       </div>
+
+      {legendGeometry.overflows && (
+        <div className="instance-legend-toggle-row">
+          <button
+            type="button"
+            className="instance-toggle-button instance-legend-toggle"
+            onClick={() => setLegendCollapsed((value) => !value)}
+            aria-expanded={!legendIsCollapsed}
+            aria-controls={legendRegionId}
+          >
+            {legendIsCollapsed ? (
+              <>
+                <ChevronDown size={14} aria-hidden />
+                展开全部 {taskStats.length} 条
+              </>
+            ) : (
+              <>
+                <ChevronUp size={14} aria-hidden />
+                收起
+              </>
+            )}
+          </button>
+        </div>
+      )}
 
       <div ref={chartSizeRef} className="instance-uplot-wrap is-large">
         {chart && options && visibleTasks.length > 0 ? (
