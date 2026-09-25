@@ -5,6 +5,8 @@ import {
   isFullZoomWindow,
   panZoomWindow,
   rangeToZoomWindow,
+  wheelZoomScale,
+  zoomWindowAtAnchor,
   zoomWindowIndexRange,
   zoomWindowToRange,
 } from "@/components/instance/chartZoom";
@@ -62,6 +64,88 @@ describe("panZoomWindow", () => {
     expect(atStart.end).toBeCloseTo(0.2, 10);
     expect(atEnd.start).toBeCloseTo(0.8, 10);
     expect(atEnd.end).toBe(1);
+  });
+});
+
+describe("zoomWindowAtAnchor", () => {
+  /** 锚点在窗口内的相对位置，换算成占完整时间轴的比例。 */
+  const anchorRatio = (window: { start: number; end: number }, anchor: number) =>
+    window.start + anchor * (window.end - window.start);
+
+  it("放大时锚点指着的时刻钉在原地", () => {
+    const before = { start: 0.2, end: 0.8 };
+    const after = zoomWindowAtAnchor(before, 0.25, 0.5);
+
+    expect(after.end - after.start).toBeCloseTo(0.3, 10);
+    expect(anchorRatio(after, 0.25)).toBeCloseTo(anchorRatio(before, 0.25), 10);
+  });
+
+  it("缩小时锚点同样钉在原地", () => {
+    const before = { start: 0.4, end: 0.6 };
+    const after = zoomWindowAtAnchor(before, 0.75, 2);
+
+    expect(after.end - after.start).toBeCloseTo(0.4, 10);
+    expect(anchorRatio(after, 0.75)).toBeCloseTo(anchorRatio(before, 0.75), 10);
+  });
+
+  it("锚点贴边时窗口被推回 [0, 1] 内且不压缩宽度", () => {
+    const atStart = zoomWindowAtAnchor({ start: 0, end: 0.2 }, 0, 2);
+    const atEnd = zoomWindowAtAnchor({ start: 0.8, end: 1 }, 1, 2);
+
+    expect(atStart).toEqual({ start: 0, end: 0.4 });
+    expect(atEnd.start).toBeCloseTo(0.6, 10);
+    expect(atEnd.end).toBeCloseTo(1, 10);
+  });
+
+  it("放大到最小宽度后不再变窄", () => {
+    const window = zoomWindowAtAnchor({ start: 0.5, end: 0.52 }, 0.5, 0.1);
+
+    expect(window.end - window.start).toBeCloseTo(0.02, 10);
+  });
+
+  it("已是全量窗口时继续缩小仍是全量", () => {
+    expect(zoomWindowAtAnchor(FULL_ZOOM_WINDOW, 0.5, 4)).toEqual(FULL_ZOOM_WINDOW);
+  });
+
+  it("非法入参原样返回", () => {
+    const window = { start: 0.2, end: 0.8 };
+
+    expect(zoomWindowAtAnchor(window, Number.NaN, 0.5)).toBe(window);
+    expect(zoomWindowAtAnchor(window, 0.5, 0)).toBe(window);
+    expect(zoomWindowAtAnchor({ start: 0.5, end: 0.5 }, 0.5, 0.5)).toEqual({
+      start: 0.5,
+      end: 0.5,
+    });
+  });
+});
+
+describe("wheelZoomScale", () => {
+  it("向下滚是缩小、向上滚是放大", () => {
+    expect(wheelZoomScale(120)).toBeGreaterThan(1);
+    expect(wheelZoomScale(-120)).toBeLessThan(1);
+  });
+
+  it("鼠标滚一格约 1.2 倍", () => {
+    expect(wheelZoomScale(120)).toBeCloseTo(1.2, 10);
+  });
+
+  it("一来一回抵消回原样", () => {
+    expect(wheelZoomScale(53) * wheelZoomScale(-53)).toBeCloseTo(1, 10);
+  });
+
+  it("按 deltaMode 折算行与页", () => {
+    expect(wheelZoomScale(7.5, 1)).toBeCloseTo(wheelZoomScale(120), 10);
+    expect(wheelZoomScale(0.3, 2)).toBeCloseTo(wheelZoomScale(120), 10);
+  });
+
+  it("一次猛滑的位移被封顶", () => {
+    expect(wheelZoomScale(99999)).toBeCloseTo(wheelZoomScale(400), 10);
+    expect(wheelZoomScale(-99999)).toBeCloseTo(wheelZoomScale(-400), 10);
+  });
+
+  it("没有位移或非有限值时倍率为 1", () => {
+    expect(wheelZoomScale(0)).toBe(1);
+    expect(wheelZoomScale(Number.NaN)).toBe(1);
   });
 });
 

@@ -59,6 +59,45 @@ export function rangeToZoomWindow(
   });
 }
 
+/**
+ * 以窗口内某个相对位置为锚点缩放。scale > 1 是缩小(看更多)，< 1 是放大。
+ * 锚点处对应的时间比例在缩放前后保持不变——光标指着哪一刻，那一刻就钉在原地。
+ */
+export function zoomWindowAtAnchor(
+  window: ChartZoomWindow,
+  anchor: number,
+  scale: number,
+): ChartZoomWindow {
+  const span = window.end - window.start;
+  if (!(span > 0) || !Number.isFinite(anchor) || !(scale > 0)) return window;
+  const nextSpan = clamp(span * scale, MIN_ZOOM_SPAN, 1);
+  const at = clamp(anchor, 0, 1);
+  const anchorRatio = window.start + at * span;
+  const start = clamp(anchorRatio - at * nextSpan, 0, 1 - nextSpan);
+  return { start, end: start + nextSpan };
+}
+
+// 滚轮 deltaMode 的三种单位：0=像素、1=行、2=页。折算系数取浏览器常用值。
+const WHEEL_LINE_PIXELS = 16;
+const WHEEL_PAGE_PIXELS = 400;
+// 一次滚轮(鼠标一格约 100~120px)对应的倍率，以及单个事件允许贡献的位移上限——
+// 不封顶的话某些鼠标一次猛滑发来的几千像素会直接把窗口顶到极限。
+const WHEEL_PIXELS_PER_STEP = 120;
+const WHEEL_STEP_SCALE = 1.2;
+const WHEEL_MAX_PIXELS = 400;
+
+/**
+ * 滚轮位移换算成缩放倍率。按位移量连续换算而不是只看方向：
+ * 触控板发来的是大量小 delta，按方向每个事件跳一格会快得没法控制。
+ */
+export function wheelZoomScale(deltaY: number, deltaMode = 0): number {
+  if (!Number.isFinite(deltaY) || deltaY === 0) return 1;
+  const unit =
+    deltaMode === 1 ? WHEEL_LINE_PIXELS : deltaMode === 2 ? WHEEL_PAGE_PIXELS : 1;
+  const pixels = clamp(deltaY * unit, -WHEEL_MAX_PIXELS, WHEEL_MAX_PIXELS);
+  return Math.exp((pixels / WHEEL_PIXELS_PER_STEP) * Math.log(WHEEL_STEP_SCALE));
+}
+
 /** 保持窗口宽度不变地平移；碰到两端就贴边停住。 */
 export function panZoomWindow(
   window: ChartZoomWindow,

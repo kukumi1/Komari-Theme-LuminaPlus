@@ -36,7 +36,10 @@ import {
 import {
   clampZoomWindow,
   FULL_ZOOM_WINDOW,
+  isFullZoomWindow,
   rangeToZoomWindow,
+  wheelZoomScale,
+  zoomWindowAtAnchor,
   zoomWindowIndexRange,
   zoomWindowToRange,
   type ChartZoomWindow,
@@ -132,16 +135,49 @@ const LOSS_MARK_MODES: readonly { value: LossMarkMode; label: string }[] = [
   { value: "off", label: "隐藏" },
 ];
 
-// 纵轴起点。从 0 起能看出延迟的绝对量级——基线低的线路就是贴着底的一条平线，
-// 尖峰才会窜起来；自适应放大到 [min, max] 区间看细节，但基线稳定时几毫秒的正常抖动
-// 也会被放大成剧烈起伏，容易误判成线路不稳。
-type YAxisMode = "zero" | "auto";
+// 纵轴量程。三档的区别只在「上限由谁决定」：
+// 全局——全部线路、完整时段的最大值，隐藏线路和横向缩放都不改变它。这样一条线的图形
+//   不会因为旁边开了几条线就变样，几毫秒的正常抖动始终被压成贴底的平线，只有真正的
+//   大波动才起伏；代价是单看一条低延迟线路时它会贴着底边，看细节得切「自适应」。
+// 从0起——仍从 0 起，但上限跟着当前可见线路和缩放区间走。
+// 自适应——放大到 [min, max] 区间看细节，代价是正常的小抖动也会被放大成剧烈起伏。
+type YAxisMode = "global" | "zero" | "auto";
 const Y_AXIS_MODES: readonly { value: YAxisMode; label: string }[] = [
+  { value: "global", label: "全局" },
   { value: "zero", label: "从0起" },
   { value: "auto", label: "自适应" },
 ];
 // 从 0 起时顶部留的余量，只为让最高的尖峰不贴着上边框。
 const Y_AXIS_ZERO_HEADROOM = 1.04;
+// 全局档的上限地板：整站都是个位数毫秒时，再贴着数据取量程又会把噪声放大回来。
+const Y_AXIS_GLOBAL_FLOOR = 20;
+// 取整用的尾数档，密到足够贴合数据、疏到刻度仍是好读的整数。
+// 写成放大 10 倍的整数是为了避开浮点尾巴——1.2 * 100 会算出 120.00000000000001。
+const NICE_AXIS_STEPS = [10, 12, 15, 20, 25, 30, 40, 50, 60, 80, 100] as const;
+
+/**
+ * 把纵轴上限向上取整到「整刻度」(1/1.2/1.5/…×10^n)，让 uPlot 分出来的刻度落在
+ * 整数上，同时天然给最高的尖峰留出余量。
+ */
+export function niceAxisTop(max: number): number {
+  if (!Number.isFinite(max) || max <= 0) return Y_AXIS_GLOBAL_FLOOR;
+  const target = Math.max(max * Y_AXIS_ZERO_HEADROOM, Y_AXIS_GLOBAL_FLOOR);
+  // 地板保证 target >= 20，于是 unit 一定是 >= 1 的整数，整数相乘不会有浮点尾巴。
+  const unit = 10 ** Math.floor(Math.log10(target)) / 10;
+  for (const step of NICE_AXIS_STEPS) {
+    const candidate = step * unit;
+    if (candidate >= target) return candidate;
+  }
+  return NICE_AXIS_STEPS[NICE_AXIS_STEPS.length - 1] * unit;
+}
+
+// 丢包率用固定档位而不是连续取整：0~100% 是有边界的量，档位少反而好横向对比。
+const LOSS_AXIS_TIERS = [5, 10, 25, 50, 100] as const;
+
+export function lossAxisTop(max: number): number {
+  if (!Number.isFinite(max)) return LOSS_AXIS_TIERS[0];
+  return LOSS_AXIS_TIERS.find((tier) => max <= tier) ?? 100;
+}
 // 顶部 padding 的基础值，色带模式下还要再加上色带自身的高度。
 const CHART_PADDING_TOP = 10;
 // 图例一律铺开显示，保证图上每条线都能在图例里找到对应。只有铺开后超过这个行数
@@ -214,7 +250,7 @@ export function PingChart({
   const [lossMarkMode, setLossMarkMode] = useState<LossMarkMode>("band");
   const [showExtremePins, setShowExtremePins] = useState(true);
   const [sampleTier, setSampleTier] = useState<SampleTier>("standard");
-  const [yAxisMode, setYAxisMode] = useState<YAxisMode>("zero");
+  const [yAxisMode, setYAxisMode] = useState<YAxisMode>("global");
   const [legendCollapsed, setLegendCollapsed] = useState(false);
   const [legendMetrics, setLegendMetrics] = useState({ contentHeight: 0, rowHeight: 0 });
   const legendRef = useRef<HTMLDivElement>(null);
@@ -233,6 +269,9 @@ export function PingChart({
   const yAxisModeRef = useRef<YAxisMode>(yAxisMode);
   const bucketsRef = useRef<Array<Array<MetricBucketStat | null>> | null>(null);
   const applyZoomRef = useRef<(next: ChartZoomWindow) => void>(() => {});
+  // 滚轮要在事件处理里同步判断「当前是不是全量」来决定放不放行页面滚动，只能读 ref。
+  const zoomWindowRef = useRef<ChartZoomWindow>(FULL_ZOOM_WINDOW);
+  const zoomAtAnchorRef = useRef<(anchor: number, scale: number) => void>(() => {});
   const [tooltip, setTooltip] = useState<ChartTooltipState>({
     show: false,
     left: 0,
@@ -454,10 +493,31 @@ export function PingChart({
       });
   }, [chart, taskColors, taskIndexById, tasks, visibleIndexRange, visibleTaskIds]);
 
-  // y 轴跟随可见区间重算：放大到某一小段后，纵向也应该铺满这段的量级，
-  // 否则缩放只是横向拉伸，看不清细节。
+  /**
+   * 全局量程：遍历全部线路、完整时段，不受隐藏和横向缩放影响。
+   * 依赖里刻意不含 visibleTaskIds / visibleIndexRange——除了语义上本就该如此，
+   * 引用稳定还让下面 setScale("y") 的 effect 不会在每个滚轮事件后白跑一次。
+   */
+  const globalYRange = useMemo<[number, number]>(() => {
+    if (!chart) return [0, 100];
+    let max = Number.NEGATIVE_INFINITY;
+    for (let index = 0; index < tasks.length; index += 1) {
+      const series = chart[index + 1] as Array<number | null | undefined> | undefined;
+      if (!series) continue;
+      for (let cursor = 0; cursor < series.length; cursor += 1) {
+        const value = series[cursor];
+        if (typeof value === "number" && Number.isFinite(value) && value > max) max = value;
+      }
+    }
+    if (chartMetric === "loss") return [0, lossAxisTop(max)];
+    return [0, niceAxisTop(max)];
+  }, [chart, chartMetric, tasks]);
+
+  // 从0起 / 自适应两档跟随可见区间重算：放大到某一小段后，纵向也铺满这段的量级，
+  // 否则缩放只是横向拉伸，看不清细节。全局档直接交还上面那个稳定引用。
   const yRange = useMemo<[number, number]>(() => {
     if (!chart) return [0, 100];
+    if (yAxisMode === "global" || chartMetric === "loss") return globalYRange;
     const fromIndex = visibleIndexRange?.fromIndex ?? 0;
     const toIndex = visibleIndexRange?.toIndex ?? (chart[0]?.length ?? 1) - 1;
     let min = Number.POSITIVE_INFINITY;
@@ -474,13 +534,6 @@ export function PingChart({
         }
       }
     }
-    if (chartMetric === "loss") {
-      if (max === Number.NEGATIVE_INFINITY || max <= 5) return [0, 5];
-      if (max <= 10) return [0, 10];
-      if (max <= 25) return [0, 25];
-      if (max <= 50) return [0, 50];
-      return [0, 100];
-    }
     if (min === Number.POSITIVE_INFINITY) return [0, 100];
     if (yAxisMode === "zero") {
       return [0, Math.max(max * Y_AXIS_ZERO_HEADROOM, 1)];
@@ -491,7 +544,7 @@ export function PingChart({
     }
     const pad = Math.max(5, (max - min) * 0.12);
     return [Math.max(0, min - pad), max + pad];
-  }, [chart, chartMetric, tasks, visibleIndexRange, visibleTaskIds, yAxisMode]);
+  }, [chart, chartMetric, globalYRange, tasks, visibleIndexRange, visibleTaskIds, yAxisMode]);
 
   // 丢包率视图下曲线本身就是丢包率，再叠一层丢包标记是重复信息；极值 pin 的数字按整数
   // 毫秒格式化，套到百分比上会把 0.3% 画成「0」。两者在该视图下一律关掉。
@@ -507,6 +560,7 @@ export function PingChart({
   };
   fullXRangeRef.current = fullXRange;
   yAxisModeRef.current = yAxisMode;
+  zoomWindowRef.current = zoomWindow;
   if (zoomedXRange) xRangeRef.current = zoomedXRange;
   yRangeRef.current = yRange;
 
@@ -533,7 +587,13 @@ export function PingChart({
 
   const resetZoomWindow = useCallback(() => setZoomWindow(FULL_ZOOM_WINDOW), []);
 
+  // 函数式更新：一帧内可能连着来好几个滚轮事件，读 state 快照会让它们都基于同一个旧窗口算。
+  const zoomAtAnchor = useCallback((anchor: number, scale: number) => {
+    setZoomWindow((prev) => clampZoomWindow(zoomWindowAtAnchor(prev, anchor, scale)));
+  }, []);
+
   applyZoomRef.current = applyZoomWindow;
+  zoomAtAnchorRef.current = zoomAtAnchor;
 
   const baseOptions = useMemo<Omit<uPlot.Options, "width" | "height"> | null>(() => {
     if (!chart) return null;
@@ -582,6 +642,9 @@ export function PingChart({
             };
           }),
     });
+    // 滚轮缩放。uPlot 自身没有这个能力，挂原生监听自己算；它和拖拽框选、底部滑块
+    // 写的是同一份 zoomWindow state，三者天然同步。
+    const wheelZoomHandlers = new WeakMap<uPlot, (event: WheelEvent) => void>();
     return {
       // 色带占用顶部 padding，绘图区要相应下移，否则色带会盖在曲线上。
       padding: [
@@ -614,13 +677,13 @@ export function PingChart({
           ticks: { stroke: grid },
           size: 54,
           // 延迟的自适应模式下轴基本不会正好落在 0，出现 0 说明贴着底、标签会和 x 轴挤在
-          // 一起，所以隐藏；从 0 起时 0 是有意义的基准刻度，要显示。丢包率一律从 0 起，
-          // 0% 本身就是要读的信息。
+          // 一起，所以隐藏；全局和从 0 起两档的 0 是有意义的基准刻度，要显示。丢包率
+          // 一律从 0 起，0% 本身就是要读的信息。
           values: (_self, splits) =>
             splits.map((value) =>
               chartMetric === "loss"
                 ? `${Number(value.toFixed(1))}%`
-                : value === 0 && yAxisModeRef.current !== "zero"
+                : value === 0 && yAxisModeRef.current === "auto"
                   ? ""
                   : `${Math.round(value)} ms`,
             ),
@@ -647,8 +710,30 @@ export function PingChart({
             );
           },
           tooltipHooks.onInit,
+          (u) => {
+            const onWheel = (event: WheelEvent) => {
+              const scale = wheelZoomScale(event.deltaY, event.deltaMode);
+              if (scale === 1) return;
+              // 已经是全量了还继续往外滚，说明用户是在翻页而不是想缩小——放行给页面，
+              // 否则鼠标扫过图表时页面就卡住不动了。
+              if (scale > 1 && isFullZoomWindow(zoomWindowRef.current)) return;
+              const rect = u.over.getBoundingClientRect();
+              if (!(rect.width > 0)) return;
+              event.preventDefault();
+              // 用 clientX 而不是 u.cursor.left：光标刚进绘图区时后者可能还是 -10。
+              zoomAtAnchorRef.current((event.clientX - rect.left) / rect.width, scale);
+            };
+            wheelZoomHandlers.set(u, onWheel);
+            u.over.addEventListener("wheel", onWheel, { passive: false });
+          },
         ],
-        destroy: [tooltipHooks.onDestroy],
+        destroy: [
+          tooltipHooks.onDestroy,
+          (u) => {
+            const onWheel = wheelZoomHandlers.get(u);
+            if (onWheel) u.over.removeEventListener("wheel", onWheel);
+          },
+        ],
         setCursor: [tooltipHooks.onSetCursor],
         draw: [
           (u) => {
@@ -893,7 +978,7 @@ export function PingChart({
             options={Y_AXIS_MODES}
             value={yAxisMode}
             onChange={setYAxisMode}
-            title="从0起：看延迟的绝对量级，线路稳定时就是一条贴底的平线；自适应：放大到实际区间看细节，但正常的小幅抖动也会被放大"
+            title="全局：量程由全部线路、完整时段决定，隐藏线路和横向缩放都不改变它——稳定的线路始终是一条贴底的平线，只有真正的大波动才起伏；从0起：同样从 0 起，但量程跟着当前可见的线路和区间走；自适应：放大到实际区间看细节，但正常的小幅抖动也会被放大成剧烈起伏"
           />
         )}
         {chartMetric === "latency" && (
