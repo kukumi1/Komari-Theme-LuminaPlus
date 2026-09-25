@@ -403,16 +403,21 @@ export interface DownsampleResult {
 // 调小 → 更多波动被保留（线更跳）；调大 → 只有非常突出的尖峰才显出来。
 const PEAK_PRESERVE_SPIKE_RATIO = 0.3;
 
-// 按时间等宽分桶降采样：降到 uPlot 抽稀阈值以下避免尖刺。
-// 三态保留：任何 null→null（断点优先，避免丢包被均值吞掉），有值→见下，全 off-phase→undefined。
-// preservePeaks=false（默认）：桶内取均值——平滑，但单点尖峰会被均值吞掉。
-// preservePeaks=true：平坦桶仍取均值（基线干净），但桶内极值偏离均值超过 PEAK_PRESERVE_SPIKE_RATIO
-//   时输出该极值——让真实尖峰/突降穿透降采样显示出来（配合关闭额外滑动平均使用）。
-export function downsampleAligned(
+interface AlignedBucketReducer {
+  addValue: (seriesIndex: number, bucket: number, pointIndex: number, value: number) => void;
+  getValue: (seriesIndex: number, bucket: number) => number | undefined;
+  /**
+   * 可选：桶内原始采样的统计，供 tooltip 说明这一格背后压了多少次探测。
+   * 不实现就不产出 buckets——加权路径(丢包率)没有"这一格最快/最慢多少毫秒"的语义。
+   */
+  getStat?: (seriesIndex: number, bucket: number) => MetricBucketStat | null;
+}
+
+function downsampleAlignedWith(
   times: number[],
   perTask: Array<Array<number | null | undefined>>,
   maxPoints: number,
-  preservePeaks = false,
+  createReducer: (seriesCount: number, bucketCount: number) => AlignedBucketReducer,
 ): DownsampleResult {
   const length = times.length;
   if (length <= maxPoints || maxPoints <= 0) return { times, perTask, buckets: null };
@@ -424,82 +429,146 @@ export function downsampleAligned(
   const bucketDuration = span / maxPoints;
 
   const seriesCount = perTask.length;
+  const reducer = createReducer(seriesCount, maxPoints);
   const timeSum = new Array<number>(maxPoints).fill(0);
   const timeCount = new Array<number>(maxPoints).fill(0);
-  const valueSum = perTask.map(() => new Array<number>(maxPoints).fill(0));
-  const valueCount = perTask.map(() => new Array<number>(maxPoints).fill(0));
   const nullCount = perTask.map(() => new Array<number>(maxPoints).fill(0));
-  // 每桶每序列的极值：保峰模式用它判断并输出尖峰，其余模式用它产出 tooltip 的桶内统计。
-  const valueMax = perTask.map(() =>
-    new Array<number>(maxPoints).fill(Number.NEGATIVE_INFINITY),
-  );
-  const valueMin = perTask.map(() =>
-    new Array<number>(maxPoints).fill(Number.POSITIVE_INFINITY),
-  );
 
-  for (let i = 0; i < length; i += 1) {
-    let bucket = Math.floor((times[i] - min) / bucketDuration);
+  for (let pointIndex = 0; pointIndex < length; pointIndex += 1) {
+    let bucket = Math.floor((times[pointIndex] - min) / bucketDuration);
     if (bucket < 0) bucket = 0;
     else if (bucket >= maxPoints) bucket = maxPoints - 1;
-    timeSum[bucket] += times[i];
+    timeSum[bucket] += times[pointIndex];
     timeCount[bucket] += 1;
-    for (let s = 0; s < seriesCount; s += 1) {
-      const value = perTask[s][i];
-      if (typeof value === "number" && Number.isFinite(value)) {
-        valueSum[s][bucket] += value;
-        valueCount[s][bucket] += 1;
-        if (value > valueMax[s][bucket]) valueMax[s][bucket] = value;
-        if (value < valueMin[s][bucket]) valueMin[s][bucket] = value;
-      } else if (value === null) {
-        nullCount[s][bucket] += 1;
+
+    for (let seriesIndex = 0; seriesIndex < seriesCount; seriesIndex += 1) {
+      const value = perTask[seriesIndex]?.[pointIndex];
+      if (value === null) {
+        nullCount[seriesIndex][bucket] += 1;
+      } else if (typeof value === "number" && Number.isFinite(value)) {
+        reducer.addValue(seriesIndex, bucket, pointIndex, value);
       }
     }
   }
 
   const outTimes: number[] = [];
   const outPerTask: Array<Array<number | null | undefined>> = perTask.map(() => []);
-  const outBuckets: Array<Array<MetricBucketStat | null>> = perTask.map(() => []);
+  const outBuckets = reducer.getStat
+    ? perTask.map(() => [] as Array<MetricBucketStat | null>)
+    : null;
   for (let bucket = 0; bucket < maxPoints; bucket += 1) {
-    if (timeCount[bucket] === 0) continue; // 跳过没有任何样本的空桶
+    if (timeCount[bucket] === 0) continue;
     outTimes.push(timeSum[bucket] / timeCount[bucket]);
-    for (let s = 0; s < seriesCount; s += 1) {
-      const count = valueCount[s][bucket];
-      // 统计只看有效采样，与下面输出的显示值无关：桶里既有丢包又有正常值时，
-      // 线要断开(null)，但"这一格最快/最慢多少"仍然是有意义的信息。
-      outBuckets[s].push(
-        count > 0
-          ? {
-              min: valueMin[s][bucket],
-              max: valueMax[s][bucket],
-              avg: valueSum[s][bucket] / count,
-              count,
-            }
-          : null,
+    for (let seriesIndex = 0; seriesIndex < seriesCount; seriesIndex += 1) {
+      // 统计与显示值分开取：桶里既有丢包又有正常值时线要断开(null)，
+      // 但"这一格最快/最慢多少"仍然是有意义的信息。
+      outBuckets?.[seriesIndex].push(reducer.getStat?.(seriesIndex, bucket) ?? null);
+      outPerTask[seriesIndex].push(
+        nullCount[seriesIndex][bucket] > 0
+          ? null
+          : reducer.getValue(seriesIndex, bucket),
       );
-      if (nullCount[s][bucket] > 0) {
-        outPerTask[s].push(null); // 断点优先：桶内有丢包就断开
-        continue;
-      }
-      if (count === 0) {
-        outPerTask[s].push(undefined); // 全 off-phase：跨过、不当断点
-        continue;
-      }
-      const mean = valueSum[s][bucket] / count;
-      if (!preservePeaks) {
-        outPerTask[s].push(mean);
-        continue;
-      }
-      // 保峰：取偏离均值更大的一侧极值；只有偏离超过阈值才用极值，否则保持均值基线干净。
-      const upDev = valueMax[s][bucket] - mean;
-      const downDev = mean - valueMin[s][bucket];
-      const extreme = upDev >= downDev ? valueMax[s][bucket] : valueMin[s][bucket];
-      const extDev = Math.max(upDev, downDev);
-      const isSpike = mean > 0 && extDev > mean * PEAK_PRESERVE_SPIKE_RATIO;
-      outPerTask[s].push(isSpike ? extreme : mean);
     }
   }
 
   return { times: outTimes, perTask: outPerTask, buckets: outBuckets };
+}
+
+// 按时间等宽分桶降采样：降到 uPlot 抽稀阈值以下避免尖刺。
+// 三态保留：任何 null→null（断点优先，避免丢包被均值吞掉），有值→见下，全 off-phase→undefined。
+// preservePeaks=false（默认）：桶内取均值——平滑，但单点尖峰会被均值吞掉。
+// preservePeaks=true：平坦桶仍取均值（基线干净），但桶内极值偏离均值超过 PEAK_PRESERVE_SPIKE_RATIO
+//   时输出该极值——让真实尖峰/突降穿透降采样显示出来（配合关闭额外滑动平均使用）。
+export function downsampleAligned(
+  times: number[],
+  perTask: Array<Array<number | null | undefined>>,
+  maxPoints: number,
+  preservePeaks = false,
+): DownsampleResult {
+  return downsampleAlignedWith(times, perTask, maxPoints, (seriesCount, bucketCount) => {
+    const valueSum = Array.from({ length: seriesCount }, () =>
+      new Array<number>(bucketCount).fill(0),
+    );
+    const valueCount = Array.from({ length: seriesCount }, () =>
+      new Array<number>(bucketCount).fill(0),
+    );
+    // 极值一律记录：保峰模式用它判断并输出尖峰，其余模式用它产出 tooltip 的桶内统计。
+    const valueMax = Array.from({ length: seriesCount }, () =>
+      new Array<number>(bucketCount).fill(Number.NEGATIVE_INFINITY),
+    );
+    const valueMin = Array.from({ length: seriesCount }, () =>
+      new Array<number>(bucketCount).fill(Number.POSITIVE_INFINITY),
+    );
+
+    return {
+      addValue(seriesIndex, bucket, _pointIndex, value) {
+        valueSum[seriesIndex][bucket] += value;
+        valueCount[seriesIndex][bucket] += 1;
+        if (value > valueMax[seriesIndex][bucket]) {
+          valueMax[seriesIndex][bucket] = value;
+        }
+        if (value < valueMin[seriesIndex][bucket]) {
+          valueMin[seriesIndex][bucket] = value;
+        }
+      },
+      getValue(seriesIndex, bucket) {
+        const count = valueCount[seriesIndex][bucket];
+        if (count === 0) return undefined; // 全 off-phase：跨过、不当断点
+        const mean = valueSum[seriesIndex][bucket] / count;
+        if (!preservePeaks) return mean;
+
+        // 保峰：取偏离均值更大的一侧极值；只有偏离超过阈值才用极值，否则保持均值基线干净。
+        const upDev = valueMax[seriesIndex][bucket] - mean;
+        const downDev = mean - valueMin[seriesIndex][bucket];
+        const extreme =
+          upDev >= downDev ? valueMax[seriesIndex][bucket] : valueMin[seriesIndex][bucket];
+        const extDev = Math.max(upDev, downDev);
+        return mean > 0 && extDev > mean * PEAK_PRESERVE_SPIKE_RATIO ? extreme : mean;
+      },
+      getStat(seriesIndex, bucket) {
+        const count = valueCount[seriesIndex][bucket];
+        if (count === 0) return null;
+        return {
+          min: valueMin[seriesIndex][bucket],
+          max: valueMax[seriesIndex][bucket],
+          avg: valueSum[seriesIndex][bucket] / count,
+          count,
+        };
+      },
+    };
+  });
+}
+
+// 与 downsampleAligned 相同的时间分桶规则，但数值按每个点代表的原始样本数加权。
+// Ping 丢包率必须走这条路径：例如 1/1 丢包与 0/59 丢包合并后应为 1/60，
+// 不能把 100% 和 0% 简单平均成 50%。null 仍代表真实断点，undefined 仍是错相采样。
+export function downsampleWeightedAligned(
+  times: number[],
+  perTask: Array<Array<number | null | undefined>>,
+  perTaskWeights: Array<Array<number | null | undefined>>,
+  maxPoints: number,
+): DownsampleResult {
+  return downsampleAlignedWith(times, perTask, maxPoints, (seriesCount, bucketCount) => {
+    const weightedValueSum = Array.from({ length: seriesCount }, () =>
+      new Array<number>(bucketCount).fill(0),
+    );
+    const weightSum = Array.from({ length: seriesCount }, () =>
+      new Array<number>(bucketCount).fill(0),
+    );
+
+    return {
+      addValue(seriesIndex, bucket, pointIndex, value) {
+        const weight = perTaskWeights[seriesIndex]?.[pointIndex];
+        if (typeof weight !== "number" || !Number.isFinite(weight) || weight <= 0) return;
+        weightedValueSum[seriesIndex][bucket] += value * weight;
+        weightSum[seriesIndex][bucket] += weight;
+      },
+      getValue(seriesIndex, bucket) {
+        const weight = weightSum[seriesIndex][bucket];
+        return weight > 0 ? weightedValueSum[seriesIndex][bucket] / weight : undefined;
+      },
+    };
+  });
 }
 
 // 按点数的滑动平均：每个数值点取前后各 floor(window/2) 个点取均值。降采样后各时段点数一致，

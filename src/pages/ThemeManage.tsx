@@ -18,6 +18,8 @@ import {
   Rows3,
   Save,
   Search,
+  SlidersHorizontal,
+  Sparkles,
   Sun,
   SunMoon,
   Video,
@@ -25,9 +27,11 @@ import {
 } from "lucide-react";
 import { clsx } from "clsx";
 import { InstancePanel } from "@/components/instance/InstancePanel";
+import { MultiPingNodeConfigPanel } from "@/components/theme/MultiPingNodeConfigPanel";
 import { Spinner } from "@/components/ui/Spinner";
 import { Flag } from "@/components/ui/Flag";
 import { usePublicConfig } from "@/hooks/usePublicConfig";
+import { useAdminEntryPath } from "@/hooks/useAdminEntryPath";
 import { useHourlyClock } from "@/hooks/useClock";
 import { queryClient } from "@/services/queryClient";
 import {
@@ -68,13 +72,17 @@ import {
 } from "@/utils/homeNodes";
 import {
   HOMEPAGE_MULTI_PING_TASK_COUNT,
+  normalizeHomepageMultiPingNodeTaskIds,
   normalizeHomepageMultiPingTaskIds,
   normalizeHomepagePingTaskBindings,
+  type HomepageMultiPingNodeTaskIds,
   type HomepagePingTaskBindings,
 } from "@/utils/pingTasks";
 import {
   DEFAULT_THEME_SETTINGS,
+  normalizeHomeHeaderVisibleSeconds,
   normalizeThemeSettings,
+  type AmbientEffect,
   type BackgroundMediaType,
   type ResolvedThemeSettings,
 } from "@/utils/themeSettings";
@@ -113,6 +121,17 @@ const BACKGROUND_POSITION_OPTIONS: Array<{ value: BackgroundPosition; label: str
   { value: "top", label: "顶部" },
   { value: "center", label: "居中" },
   { value: "bottom", label: "底部" },
+];
+const AMBIENT_EFFECT_OPTIONS: Array<{
+  value: AmbientEffect;
+  label: string;
+}> = [
+  { value: "sakura", label: "樱花飘落" },
+  { value: "rain", label: "细雨" },
+  { value: "snow", label: "缓雪" },
+  { value: "leaves", label: "秋叶飘落" },
+  { value: "confetti", label: "庆典彩纸" },
+  { value: "fireworks", label: "烟花" },
 ];
 
 function localDateInputMax() {
@@ -273,10 +292,14 @@ function pickManagedThemeSettings(settings: ResolvedThemeSettings) {
     defaultAppearance: settings.defaultAppearance,
     desktopNodeViewMode: settings.desktopNodeViewMode,
     mobileNodeViewMode: settings.mobileNodeViewMode,
+    hideAdminEntryWhenLoggedOut: settings.hideAdminEntryWhenLoggedOut,
     homepagePingBindings: settings.homepagePingBindings,
     enableHomepageMultiPing: settings.enableHomepageMultiPing,
     homepageMultiPingTaskIds: settings.homepageMultiPingTaskIds,
+    homepageMultiPingNodeTaskIds: settings.homepageMultiPingNodeTaskIds,
     fakePingForUnbound: settings.fakePingForUnbound,
+    enableHomeHeaderAutoHide: settings.enableHomeHeaderAutoHide,
+    homeHeaderVisibleSeconds: settings.homeHeaderVisibleSeconds,
     showHomeOverview: settings.showHomeOverview,
     showGroupTabs: settings.showGroupTabs,
     showRegionBar: settings.showRegionBar,
@@ -285,6 +308,7 @@ function pickManagedThemeSettings(settings: ResolvedThemeSettings) {
     enableHomeSort: settings.enableHomeSort,
     homeSortField: settings.homeSortField,
     homeSortDirection: settings.homeSortDirection,
+    showCostsToGuests: settings.showCostsToGuests,
     showCostSummary: settings.showCostSummary,
     showCostSummaryFloatingButton: settings.showCostSummaryFloatingButton,
     showOverviewRatings: settings.showOverviewRatings,
@@ -317,6 +341,8 @@ function pickManagedThemeSettings(settings: ResolvedThemeSettings) {
     backgroundVideoDark: settings.backgroundVideoDark,
     backgroundAlignment: settings.backgroundAlignment,
     surfaceOpacity: settings.surfaceOpacity,
+    enableAmbientEffect: settings.enableAmbientEffect,
+    ambientEffect: settings.ambientEffect,
   };
 }
 
@@ -693,8 +719,84 @@ const PremiumList = memo(function PremiumList({
   );
 });
 
+// 弹窗开关留在这个小组件内，打开面板时不再让整个设置页跟着重渲染。
+const MultiPingNodeConfigControl = memo(function MultiPingNodeConfigControl({
+  clients,
+  tasks,
+  globalTaskIds,
+  nodeTaskIds,
+  configuredNodeCount,
+  fakePingForUnbound,
+  disabled,
+  saving,
+  saveDisabled,
+  saveError,
+  onChange,
+  onSave,
+}: {
+  clients: AdminClient[];
+  tasks: PingTask[];
+  globalTaskIds: number[];
+  nodeTaskIds: HomepageMultiPingNodeTaskIds;
+  configuredNodeCount: number;
+  fakePingForUnbound: boolean;
+  disabled: boolean;
+  saving: boolean;
+  saveDisabled: boolean;
+  saveError: string | null;
+  onChange: (next: HomepageMultiPingNodeTaskIds) => void;
+  onSave: () => Promise<boolean>;
+}) {
+  const [open, setOpen] = useState(false);
+  const close = useCallback(() => setOpen(false), []);
+
+  return (
+    <>
+      <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-[var(--hairline)] pt-4">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2 text-[12px] font-medium text-[var(--text-primary)]">
+            <SlidersHorizontal size={14} />
+            按服务器覆盖
+          </div>
+          <p className="mt-1 text-[11px] text-[var(--text-tertiary)]">
+            已单独配置 {configuredNodeCount} / {clients.length} 台服务器
+          </p>
+        </div>
+        <button
+          type="button"
+          disabled={disabled}
+          onClick={() => setOpen(true)}
+          className="theme-manage-button is-compact"
+        >
+          <SlidersHorizontal size={13} />
+          配置服务器探测点
+        </button>
+      </div>
+
+      {open && (
+        <MultiPingNodeConfigPanel
+          open
+          clients={clients}
+          tasks={tasks}
+          globalTaskIds={globalTaskIds}
+          nodeTaskIds={nodeTaskIds}
+          fakePingForUnbound={fakePingForUnbound}
+          saving={saving}
+          saveDisabled={saveDisabled}
+          saveError={saveError}
+          onChange={onChange}
+          onClose={close}
+          onSave={onSave}
+        />
+      )}
+    </>
+  );
+});
+
 export function ThemeManage() {
   const now = useHourlyClock();
+  const adminEntryPath = useAdminEntryPath();
+  const adminPingHref = adminEntryPath ? `${adminEntryPath}/ping` : undefined;
   const {
     data: config,
     isLoading: configLoading,
@@ -757,6 +859,18 @@ export function ThemeManage() {
         : { ...prev, homepageMultiPingTaskIds };
     });
   }, []);
+  const patchNodeMultiPingTaskIds = useCallback(
+    (next: HomepageMultiPingNodeTaskIds) => {
+      editVersionRef.current += 1;
+      const normalized = normalizeHomepageMultiPingNodeTaskIds(next);
+      setDraft((prev) =>
+        JSON.stringify(prev.homepageMultiPingNodeTaskIds) === JSON.stringify(normalized)
+          ? prev
+          : { ...prev, homepageMultiPingNodeTaskIds: normalized },
+      );
+    },
+    [],
+  );
 
   const {
     data: pingTasks,
@@ -998,6 +1112,9 @@ export function ThemeManage() {
     return {
       ...rest,
       homepagePingBindings: pruneBindings(rest.homepagePingBindings),
+      homepageMultiPingNodeTaskIds: normalizeHomepageMultiPingNodeTaskIds(
+        rest.homepageMultiPingNodeTaskIds,
+      ),
       homeGroupOrder: normalizeHomeGroupOrder(rest.homeGroupOrder),
       trafficRatingLabels: ratingLabels.traffic,
       bandwidthRatingLabels: ratingLabels.bandwidth,
@@ -1065,6 +1182,12 @@ export function ThemeManage() {
       ),
     [draft.homepagePingBindings],
   );
+  const multiPingConfiguredNodeCount = useMemo(
+    () =>
+      sortedClients.filter((client) => draft.homepageMultiPingNodeTaskIds[client.uuid])
+        .length,
+    [draft.homepageMultiPingNodeTaskIds, sortedClients],
+  );
 
   // 每个 client 归属哪个 task 的反查,只在绑定草稿变化时重建。与「全选可用」reducer
   // 共用 invertBindings() 避免推导漂移,并把可选节点过滤保持在 O(tasks × clients),
@@ -1074,7 +1197,7 @@ export function ThemeManage() {
     [draft.homepagePingBindings],
   );
 
-  const handleSave = async () => {
+  const handleSave = async (): Promise<boolean> => {
     if (
       !config?.theme ||
       savingDraftRef.current ||
@@ -1082,7 +1205,7 @@ export function ThemeManage() {
       videoInputInvalid ||
       draftMultiPingInvalid
     ) {
-      return;
+      return false;
     }
     const submittedEditVersion = editVersionRef.current;
     savingDraftRef.current = draft;
@@ -1099,16 +1222,19 @@ export function ThemeManage() {
       await queryClient.invalidateQueries({ queryKey: ["public"] });
       if (editVersionRef.current === submittedEditVersion) {
         setMessage("主题设置已保存");
+        return true;
       }
+      return false;
     } catch (saveError) {
       if (
         saveError instanceof ApiRequestError &&
         (saveError.status === 401 || saveError.status === 403)
       ) {
         setAccessRevoked(true);
-        return;
+        return false;
       }
       setError(saveError instanceof Error ? saveError.message : "保存失败");
+      return false;
     } finally {
       savingDraftRef.current = null;
       setSaving(false);
@@ -1249,7 +1375,7 @@ export function ThemeManage() {
               <dt>已绑定 Ping</dt>
               <dd>
                 {draft.enableHomepageMultiPing
-                  ? `三网 ${draft.homepageMultiPingTaskIds.length} / 3`
+                  ? `三网覆盖 ${multiPingConfiguredNodeCount} 台`
                   : `${assignedNodeCount} / ${sortedClients.length}`}
               </dd>
             </div>
@@ -1384,6 +1510,37 @@ export function ThemeManage() {
             checked={draft.enableBackgroundImage}
             onPatch={patch}
           />
+
+          <div className="surface-inset flex flex-col gap-3 px-4 py-4">
+            <ToggleRow
+              field="enableAmbientEffect"
+              title="启用背景动效"
+              desc="默认关闭；开启后在页面上轻量渲染所选氛围效果，不影响点击和滚动。"
+              checked={draft.enableAmbientEffect}
+              onPatch={patch}
+            />
+            <label className="flex min-w-0 flex-col gap-2">
+              <span className="inline-flex items-center gap-2 text-[12px] font-medium text-[var(--text-secondary)]">
+                <Sparkles size={14} />
+                动效选择
+              </span>
+              <select
+                value={draft.ambientEffect}
+                onChange={(event) => patch("ambientEffect", event.target.value as AmbientEffect)}
+                disabled={!draft.enableAmbientEffect}
+                className="surface-inset w-full px-3 py-2 text-[13px] outline-none disabled:cursor-not-allowed disabled:opacity-55"
+              >
+                {AMBIENT_EFFECT_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+              <span className="text-[11px] leading-relaxed text-[var(--text-tertiary)]">
+                关闭总开关时保留当前选择且不创建渲染层；移动端会自动降低粒子数量，系统减少动态效果时停止播放。
+              </span>
+            </label>
+          </div>
 
           <div className="surface-inset flex flex-col gap-3 px-4 py-4">
             <div className="text-[13px] font-semibold text-[var(--text-primary)]">桌面端背景类型</div>
@@ -1553,6 +1710,47 @@ export function ThemeManage() {
         description="控制首页顶部总览、分组筛选和节点排序方式；适合节点较多时快速查看状态。"
         aside={<ListFilter size={16} />}
       >
+        <div className="mb-4 grid gap-3 md:grid-cols-2">
+          <ToggleRow
+            field="enableHomeHeaderAutoHide"
+            title="定时隐藏顶部信息"
+            desc="首页加载完成后，同时隐藏站点名称与右上角快捷设置；刷新页面后重新显示。"
+            checked={draft.enableHomeHeaderAutoHide}
+            onPatch={patch}
+          />
+          <div className="surface-inset flex items-center justify-between gap-3 px-4 py-3">
+            <span className="min-w-0">
+              <span className="block text-[13px] font-medium text-[var(--text-primary)]">
+                显示时长
+              </span>
+              <span className="mt-1 block text-[11px] text-[var(--text-tertiary)]">
+                可设置 1–3600 秒，默认 10 秒。
+              </span>
+            </span>
+            <span className="inline-flex shrink-0 items-center gap-1.5">
+              <input
+                type="number"
+                min={1}
+                max={3600}
+                step={1}
+                inputMode="numeric"
+                value={draft.homeHeaderVisibleSeconds}
+                disabled={!draft.enableHomeHeaderAutoHide}
+                onChange={(event) => {
+                  if (event.target.value.trim() === "") return;
+                  patch(
+                    "homeHeaderVisibleSeconds",
+                    normalizeHomeHeaderVisibleSeconds(event.target.value),
+                  );
+                }}
+                aria-label="顶部信息显示时长（秒）"
+                className="surface-inset w-20 px-3 py-2 text-right text-[13px] tabular outline-none disabled:opacity-45"
+              />
+              <span className="text-[13px] font-medium text-[var(--text-tertiary)]">秒</span>
+            </span>
+          </div>
+        </div>
+
         <div className="grid gap-3 md:grid-cols-3">
           <ToggleRow
             field="showHomeOverview"
@@ -1587,6 +1785,13 @@ export function ThemeManage() {
             title="启用排序切换"
             desc="首页显示排序控件，访客可临时切换排序方式（离线节点恒定置底）。"
             checked={draft.enableHomeSort}
+            onPatch={patch}
+          />
+          <ToggleRow
+            field="hideAdminEntryWhenLoggedOut"
+            title="未登录时隐藏后台入口"
+            desc="仅隐藏访客看到的“后台登录”；/admin 仍可直接访问，登录后自动显示“管理”。"
+            checked={draft.hideAdminEntryWhenLoggedOut}
             onPatch={patch}
           />
         </div>
@@ -1844,6 +2049,13 @@ export function ThemeManage() {
         <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(280px,0.8fr)]">
           <div className="flex flex-col gap-3">
             <ToggleRow
+              field="showCostsToGuests"
+              title="向未登录访客公开费用"
+              desc="关闭后，续费价格、资产统计和价格排序仅登录管理员可见；到期时间仍正常显示。"
+              checked={draft.showCostsToGuests}
+              onPatch={patch}
+            />
+            <ToggleRow
               field="showCostSummary"
               title="显示资产页入口按钮"
               desc="在首页资产概览卡右上角显示进入资产统计页的按钮。"
@@ -1948,11 +2160,11 @@ export function ThemeManage() {
         title="主页延迟检测"
         description={
           <>
-            单线路模式为每个节点绑定一项 Ping 任务；开启三网模式后，大卡片和小卡片统一展示指定的三项任务，迷你卡片与列表仍显示节点的单线路绑定。
+            单线路模式为每个节点绑定一项 Ping 任务；开启三网模式后，大卡片和小卡片默认展示三项全局任务，也可以为每台服务器单独覆盖探测点。迷你卡片与列表仍显示节点的单线路绑定。
             {" "}
             如果当前还没有可用任务，请先前往
             {" "}
-            <a href="/admin/ping" className="theme-manage-inline-link">
+            <a href={adminPingHref} className="theme-manage-inline-link">
               后台 Ping 管理
             </a>
             {" "}
@@ -1964,7 +2176,7 @@ export function ThemeManage() {
             {tasksLoading || clientsLoading
               ? "载入中"
               : draft.enableHomepageMultiPing
-                ? `三网 ${draft.homepageMultiPingTaskIds.length} / 3`
+                ? `已覆盖 ${multiPingConfiguredNodeCount} 台`
                 : `${sortedTasks.length} 个任务`}
           </div>
         }
@@ -1983,8 +2195,7 @@ export function ThemeManage() {
                   开启三网模式
                 </span>
                 <span className="mt-1 block text-[11px] leading-relaxed text-[var(--text-tertiary)]">
-                  默认关闭。开启后大卡片和小卡片统一显示下面三项 Ping
-                  任务；迷你卡片与列表继续使用原有单线路绑定。
+                  大卡片和小卡片使用三网延迟；未单独配置的服务器继承下面的全局默认线路。
                 </span>
               </span>
               <input
@@ -2004,6 +2215,14 @@ export function ThemeManage() {
 
             {draft.enableHomepageMultiPing && (
               <div className="mt-4 border-t border-[var(--hairline)] pt-4">
+                <div className="mb-3 flex flex-wrap items-baseline justify-between gap-2">
+                  <span className="text-[12px] font-medium text-[var(--text-primary)]">
+                    全局默认线路
+                  </span>
+                  <span className="text-[11px] text-[var(--text-tertiary)]">
+                    按顺序显示在节点卡片中
+                  </span>
+                </div>
                 <div className="grid gap-3 md:grid-cols-3">
                   {Array.from(
                     { length: HOMEPAGE_MULTI_PING_TASK_COUNT },
@@ -2059,8 +2278,28 @@ export function ThemeManage() {
                 >
                   {draftMultiPingInvalid
                     ? "请选满 3 个不同的 Ping 任务后再保存。"
-                    : "三项任务按这里的顺序显示；某项任务没有节点样本时保留该行并显示“无样本”。"}
+                    : "未设置单独覆盖的服务器都会使用这三项任务。"}
                 </p>
+
+                <MultiPingNodeConfigControl
+                  clients={sortedClients}
+                  tasks={sortedTasks}
+                  globalTaskIds={draft.homepageMultiPingTaskIds}
+                  nodeTaskIds={draft.homepageMultiPingNodeTaskIds}
+                  configuredNodeCount={multiPingConfiguredNodeCount}
+                  fakePingForUnbound={draft.fakePingForUnbound}
+                  disabled={draftMultiPingInvalid || clientsLoading || tasksLoading}
+                  saving={saving}
+                  saveError={error}
+                  saveDisabled={
+                    !isDirty ||
+                    draftCostRateApiUrlInvalid ||
+                    videoInputInvalid ||
+                    draftMultiPingInvalid
+                  }
+                  onChange={patchNodeMultiPingTaskIds}
+                  onSave={handleSave}
+                />
               </div>
             )}
           </div>
@@ -2080,7 +2319,7 @@ export function ThemeManage() {
               <span>首页绑定总数</span>
               <strong className="text-[var(--text-primary)]">
                 {draft.enableHomepageMultiPing
-                  ? `${draft.homepageMultiPingTaskIds.length} / 3 条线路`
+                  ? `${multiPingConfiguredNodeCount} 台单独覆盖`
                   : `${assignedNodeCount} / ${sortedClients.length}`}
               </strong>
             </div>
@@ -2094,8 +2333,8 @@ export function ThemeManage() {
 
           <ToggleRow
             field="fakePingForUnbound"
-            title="未绑定节点显示模拟延迟"
-            desc="未绑定单线路 Ping 任务的在线节点显示前端生成的模拟数据（延迟 1-10ms、丢包 0%）。开启三网模式时仍用于迷你卡片和列表，大卡片与小卡片显示真实三网数据；模拟数据仅用于视觉统一，不代表真实网络质量。"
+            title="未绑定探测点显示模拟延迟"
+            desc="用户主动开启后，未绑定单线路 Ping 任务的在线节点，以及三网模式中后台未绑定的探测点，都会显示前端生成的模拟数据（延迟 1-10ms、丢包 0%）。模拟数据仅用于视觉统一，不代表真实网络质量。"
             checked={draft.fakePingForUnbound}
             onPatch={patch}
           />
@@ -2109,7 +2348,7 @@ export function ThemeManage() {
           {noTasksYet && (
             <div className="theme-manage-empty-state">
               <span>当前还没有可用于首页展示的 Ping 任务。</span>
-              <a href="/admin/ping" className="theme-manage-inline-link">
+              <a href={adminPingHref} className="theme-manage-inline-link">
                 前往后台 Ping 管理创建任务
               </a>
             </div>
@@ -2147,6 +2386,7 @@ export function ThemeManage() {
             })}
         </div>
       </InstancePanel>
+
     </div>
   );
 }

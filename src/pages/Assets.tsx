@@ -6,6 +6,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Flag } from "@/components/ui/Flag";
 import { Spinner } from "@/components/ui/Spinner";
 import { useThemeSettings } from "@/hooks/useThemeSettings";
+import { useAuth } from "@/hooks/useAuth";
 import { useMediaQuery } from "@/hooks/useMediaQuery";
 import { useHourlyClock } from "@/hooks/useClock";
 import { useVisibleNodes } from "@/hooks/useVisibleNodes";
@@ -20,6 +21,7 @@ import { getExpireDaysRemaining, LONG_TERM_EXPIRE_DAYS } from "@/utils/format";
 import {
   getRenewalReminders,
 } from "@/utils/renewalReminder";
+import { canViewCosts } from "@/utils/themeSettings";
 
 type AssetDetail = ReturnType<typeof calculateCostSummary>["details"][number];
 type AssetsSortField =
@@ -121,6 +123,11 @@ export function Assets() {
   const isMobileLayout = useMediaQuery(ASSETS_MOBILE_QUERY);
   const now = useHourlyClock();
   const themeSettings = useThemeSettings();
+  const { data: me, isPending: authPending } = useAuth();
+  const costsVisible =
+    themeSettings.isReady &&
+    !authPending &&
+    canViewCosts(themeSettings, me?.logged_in === true);
   const forceRateRefresh = useRef(false);
   const nodes = useVisibleNodes();
   // 资产详情页是风险核对入口：这里始终按真实到期数据展示，不读取首页的关闭/稍后偏好。
@@ -137,12 +144,12 @@ export function Assets() {
       return getExchangeRates(themeSettings.costRateApiUrl, { signal, ignoreCache });
     },
     staleTime: 60 * 60 * 1000,
-    enabled: themeSettings.isReady && nodes.length > 0,
+    enabled: costsVisible && nodes.length > 0,
     retry: 1,
   });
   const summary = useMemo(
     () =>
-      rateQuery.data
+      costsVisible && rateQuery.data
         ? calculateCostSummary(
             nodes,
             themeSettings.costIgnoredNodes,
@@ -151,7 +158,7 @@ export function Assets() {
             now,
           )
         : null,
-    [nodes, now, themeSettings.costIgnoredNodes, themeSettings.costPremiums, rateQuery.data],
+    [costsVisible, nodes, now, themeSettings.costIgnoredNodes, themeSettings.costPremiums, rateQuery.data],
   );
   const detailRows = useMemo(() => {
     const direction = sortDirection === "asc" ? 1 : -1;
@@ -185,12 +192,16 @@ export function Assets() {
     }
   };
 
-  if (!themeSettings.isReady) {
+  if (!themeSettings.isReady || authPending) {
     return (
       <div className="flex h-[60vh] items-center justify-center">
         <Spinner size={24} />
       </div>
     );
+  }
+
+  if (!costsVisible) {
+    return <Navigate to="/" replace />;
   }
 
   // 两个入口都关闭 = 站长不想暴露资产信息,直连 URL 一并回首页。

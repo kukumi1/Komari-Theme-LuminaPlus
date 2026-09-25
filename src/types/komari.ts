@@ -114,11 +114,15 @@ export interface ThemeSettings {
   desktopNodeViewMode?: "large" | "compact" | "mini" | "list";
   mobileNodeViewMode?: "large" | "compact" | "mini" | "list";
   enableAdminButton?: boolean;
+  hideAdminEntryWhenLoggedOut?: boolean;
   showPingChart?: boolean;
   homepagePingBindings?: Record<string, string[]>;
   enableHomepageMultiPing?: boolean;
   homepageMultiPingTaskIds?: number[];
+  homepageMultiPingNodeTaskIds?: Record<string, number[]>;
   fakePingForUnbound?: boolean;
+  enableHomeHeaderAutoHide?: boolean;
+  homeHeaderVisibleSeconds?: number;
   showHomeOverview?: boolean;
   showGroupTabs?: boolean;
   showRegionBar?: boolean;
@@ -127,6 +131,7 @@ export interface ThemeSettings {
   enableHomeSort?: boolean;
   homeSortField?: "default" | "name" | "speed" | "traffic" | "price";
   homeSortDirection?: "asc" | "desc";
+  showCostsToGuests?: boolean;
   showCostSummary?: boolean;
   showCostSummaryFloatingButton?: boolean;
   showOverviewRatings?: boolean;
@@ -157,6 +162,14 @@ export interface ThemeSettings {
   backgroundVideoDark?: string;
   backgroundAlignment?: string;
   surfaceOpacity?: number;
+  enableAmbientEffect?: boolean;
+  ambientEffect?:
+    | "sakura"
+    | "rain"
+    | "snow"
+    | "leaves"
+    | "confetti"
+    | "fireworks";
 }
 
 export const PublicConfigSchema = z

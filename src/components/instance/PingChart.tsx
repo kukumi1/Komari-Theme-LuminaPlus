@@ -16,10 +16,12 @@ import {
 import { ChartTooltip, CycleToggle, SwitchToggle } from "./ChartParts";
 import { ChartRangeSlider, type ChartRangePreviewSeries } from "./ChartRangeSlider";
 import { PingTaskStatsPopover } from "./PingTaskStatsPopover";
+import { alignPingChartRecords } from "./pingChartData";
 import {
   cutPeakValues,
   detectTypicalIntervalSeconds,
   downsampleAligned,
+  downsampleWeightedAligned,
   insertMetricGapSentinels,
   smoothByCount,
   type MetricBucketStat,
@@ -41,10 +43,12 @@ import {
 } from "./chartZoom";
 import { latencyHeatColor, lossHeatColor } from "@/utils/metricTone";
 import { historyChartRangeSeconds, historyCoverageLabel } from "@/utils/historyRange";
-import { resolvePingChartInterval, resolvePingSampleCounts } from "@/utils/pingMetrics";
+import {
+  resolvePingChartInterval,
+  resolvePingSampleCounts,
+} from "@/utils/pingMetrics";
 import { usePreferences } from "@/hooks/usePreferences";
 import type { PingRecord, PingTaskStats } from "@/types/komari";
-import type { TimedMetricPoint } from "./chartData";
 
 interface WeightedLatency {
   value: number;
@@ -204,6 +208,7 @@ export function PingChart({
   const { resolvedAppearance } = usePreferences();
   const { w, h, ref: chartSizeRef } = useResponsiveChartSize("wide");
   const [hiddenTasks, setHiddenTasks] = useState<Set<number>>(new Set());
+  const [chartMetric, setChartMetric] = useState<"latency" | "loss">("latency");
   const [connectNulls, setConnectNulls] = useState(false);
   const [cutPeak, setCutPeak] = useState(false);
   const [lossMarkMode, setLossMarkMode] = useState<LossMarkMode>("band");
@@ -295,9 +300,8 @@ export function PingChart({
     [data],
   );
 
-  const chartBundle = useMemo(() => {
+  const chartPoints = useMemo(() => {
     if (!data?.records.length || !tasks.length) return null;
-    const pointMap = new Map<number, TimedMetricPoint>();
     const taskIntervals = tasks
       .map((task) => task.interval)
       .filter((value): value is number => typeof value === "number" && value > 0);
@@ -312,23 +316,7 @@ export function PingChart({
     );
     const tolerance = Math.min(6, Math.max(0.8, fallbackInterval * 0.25));
 
-    // 升序游标把邻近任务采样合并到同一时间锚点，保持 O(n)。
-    let lastAnchor = Number.NEGATIVE_INFINITY;
-    for (const { record, time } of sortedRecords) {
-      if (!taskKeySet.has(String(record.task_id))) continue;
-      const anchor = time - lastAnchor <= tolerance ? lastAnchor : time;
-      if (anchor === time) lastAnchor = time;
-      const current = pointMap.get(anchor) ?? { time: anchor };
-      // 0 是亚毫秒成功，负值才表示丢包。
-      current[String(record.task_id)] = record.value >= 0 ? record.value : null;
-      pointMap.set(anchor, current);
-    }
-
-    let chartPoints = [...pointMap.values()].sort((a, b) => a.time - b.time);
-    if (cutPeak && taskKeys.length > 0) {
-      chartPoints = cutPeakValues(chartPoints, taskKeys);
-    }
-    chartPoints = insertMetricGapSentinels(chartPoints, {
+    const gapOptions = {
       intervals: new Map(
         tasks.map((task) => [
           String(task.id),
@@ -337,11 +325,26 @@ export function PingChart({
       ),
       defaultInterval: fallbackInterval,
       matchToleranceRatio: 0.25,
-    });
-    const times = chartPoints.map((point) => point.time);
+    };
+
+    return {
+      ...alignPingChartRecords(sortedRecords, taskKeySet, tolerance),
+      gapOptions,
+    };
+  }, [data, sortedRecords, taskKeySet, tasks]);
+
+  // 对齐结果独立缓存；仅对当前指标执行断点处理和降采样，削峰不影响丢包率。
+  const latencyChart = useMemo(() => {
+    if (!chartPoints || chartMetric !== "latency") return null;
+    let points = chartPoints.latencyPoints;
+    if (cutPeak && taskKeys.length > 0) {
+      points = cutPeakValues(points, taskKeys);
+    }
+    points = insertMetricGapSentinels(points, chartPoints.gapOptions);
+    const times = points.map((point) => point.time);
     // undefined 表示错相采样，null 表示真实断点。
     const perTask = taskKeys.map((taskKey) =>
-      chartPoints.map((point) => point[taskKey]),
+      points.map((point) => point[taskKey]),
     );
 
     const reduced = downsampleAligned(times, perTask, maxRenderPoints, !cutPeak);
@@ -354,8 +357,35 @@ export function PingChart({
       data: [reduced.times, ...smoothed] as uPlot.AlignedData,
       buckets: reduced.buckets,
     };
-  }, [cutPeak, data, maxRenderPoints, sortedRecords, taskKeySet, taskKeys, tasks]);
+  }, [chartMetric, chartPoints, cutPeak, maxRenderPoints, taskKeys]);
 
+  const lossChart = useMemo(() => {
+    if (!chartPoints || chartMetric !== "loss") return null;
+    const lossPoints = insertMetricGapSentinels(
+      chartPoints.lossPoints,
+      chartPoints.gapOptions,
+    );
+    const lossTimes = lossPoints.map((point) => point.time);
+    const lossPerTask = taskKeys.map((taskKey) =>
+      lossPoints.map((point) => point[taskKey]),
+    );
+    const lossWeights = taskKeys.map((taskKey) =>
+      lossPoints.map((point) => chartPoints.lossWeightMap.get(point.time)?.[taskKey]),
+    );
+    const reducedLoss = downsampleWeightedAligned(
+      lossTimes,
+      lossPerTask,
+      lossWeights,
+      maxRenderPoints,
+    );
+    // 丢包率没有"这一格最快/最慢多少毫秒"的语义，桶统计只在延迟指标下给。
+    return {
+      data: [reducedLoss.times, ...reducedLoss.perTask] as uPlot.AlignedData,
+      buckets: null,
+    };
+  }, [chartMetric, chartPoints, maxRenderPoints, taskKeys]);
+
+  const chartBundle = chartMetric === "loss" ? lossChart : latencyChart;
   const chart = chartBundle?.data ?? null;
 
   useEffect(() => {
@@ -444,6 +474,13 @@ export function PingChart({
         }
       }
     }
+    if (chartMetric === "loss") {
+      if (max === Number.NEGATIVE_INFINITY || max <= 5) return [0, 5];
+      if (max <= 10) return [0, 10];
+      if (max <= 25) return [0, 25];
+      if (max <= 50) return [0, 50];
+      return [0, 100];
+    }
     if (min === Number.POSITIVE_INFINITY) return [0, 100];
     if (yAxisMode === "zero") {
       return [0, Math.max(max * Y_AXIS_ZERO_HEADROOM, 1)];
@@ -454,12 +491,20 @@ export function PingChart({
     }
     const pad = Math.max(5, (max - min) * 0.12);
     return [Math.max(0, min - pad), max + pad];
-  }, [chart, tasks, visibleIndexRange, visibleTaskIds, yAxisMode]);
+  }, [chart, chartMetric, tasks, visibleIndexRange, visibleTaskIds, yAxisMode]);
+
+  // 丢包率视图下曲线本身就是丢包率，再叠一层丢包标记是重复信息；极值 pin 的数字按整数
+  // 毫秒格式化，套到百分比上会把 0.3% 画成「0」。两者在该视图下一律关掉。
+  const effectiveLossMarkMode: LossMarkMode = chartMetric === "loss" ? "off" : lossMarkMode;
+  const effectiveShowExtremePins = chartMetric !== "loss" && showExtremePins;
 
   // 这些 ref 必须在 render 期间对齐：uPlot 挂载那一帧就会调用 scales 的 range() 和 draw hook，
   // 放到 effect 里赋值会晚一帧，首帧会用上一轮(甚至初始占位)的区间和覆盖层画一次。
   overlaysRef.current = overlays;
-  overlayFlagsRef.current = { lossMarkMode, showExtremePins };
+  overlayFlagsRef.current = {
+    lossMarkMode: effectiveLossMarkMode,
+    showExtremePins: effectiveShowExtremePins,
+  };
   fullXRangeRef.current = fullXRange;
   yAxisModeRef.current = yAxisMode;
   if (zoomedXRange) xRangeRef.current = zoomedXRange;
@@ -467,7 +512,7 @@ export function PingChart({
 
   useEffect(() => {
     plotRef.current?.redraw();
-  }, [overlays, showExtremePins, lossMarkMode]);
+  }, [overlays, effectiveShowExtremePins, effectiveLossMarkMode]);
 
   useEffect(() => {
     const plot = plotRef.current;
@@ -518,13 +563,16 @@ export function PingChart({
             return b.raw - a.raw;
           })
           .map(({ label, raw, color, taskId, taskIndex }) => {
-            // 对标哪吒服务监控图的图例格式「名称 丢包%: 延迟 ms」，
-            // 悬停时不用回头去看图例就知道这条线当前的健康度。
-            const loss = lossByTaskRef.current.get(taskId);
+            const isLossMetric = chartMetric === "loss";
+            // 对标哪吒服务监控图的图例格式「名称 丢包%: 延迟 ms」，悬停时不用回头看图例
+            // 就知道这条线当前的健康度。丢包指标下数值本身就是丢包率，再加前缀纯属重复。
+            const loss = isLossMetric ? null : lossByTaskRef.current.get(taskId);
+            // buckets 只在延迟指标下产出，丢包率没有"这一格多少毫秒"的语义。
             const bucket = bucketsRef.current?.[taskIndex]?.[idx] ?? null;
             return {
               label: loss == null ? label : `${label} ${loss.toFixed(1)}%`,
-              value: raw == null ? "—" : `${raw.toFixed(1)} ms`,
+              value:
+                raw == null ? "—" : isLossMetric ? `${raw.toFixed(1)}%` : `${raw.toFixed(1)} ms`,
               color,
               // 这一格背后压了多次探测时才有意义：单次采样的 min/max/avg 就是它自己。
               note:
@@ -538,7 +586,7 @@ export function PingChart({
       // 色带占用顶部 padding，绘图区要相应下移，否则色带会盖在曲线上。
       padding: [
         CHART_PADDING_TOP +
-          (lossMarkMode === "band" ? lossBandHeight(visibleTasks.length) : 0),
+          (effectiveLossMarkMode === "band" ? lossBandHeight(visibleTasks.length) : 0),
         14,
         12,
         2,
@@ -565,11 +613,16 @@ export function PingChart({
           grid: { stroke: grid, width: 1 },
           ticks: { stroke: grid },
           size: 54,
-          // 自适应模式下轴基本不会正好落在 0，出现 0 说明贴着底、标签会和 x 轴挤在一起，
-          // 所以隐藏；从 0 起时 0 是有意义的基准刻度，要显示。
+          // 延迟的自适应模式下轴基本不会正好落在 0，出现 0 说明贴着底、标签会和 x 轴挤在
+          // 一起，所以隐藏；从 0 起时 0 是有意义的基准刻度，要显示。丢包率一律从 0 起，
+          // 0% 本身就是要读的信息。
           values: (_self, splits) =>
             splits.map((value) =>
-              value === 0 && yAxisModeRef.current !== "zero" ? "" : `${Math.round(value)} ms`,
+              chartMetric === "loss"
+                ? `${Number(value.toFixed(1))}%`
+                : value === 0 && yAxisModeRef.current !== "zero"
+                  ? ""
+                  : `${Math.round(value)} ms`,
             ),
         },
       ],
@@ -588,7 +641,10 @@ export function PingChart({
         init: [
           (u) => {
             u.root.setAttribute("role", "img");
-            u.root.setAttribute("aria-label", `Ping 延迟历史图表，共 ${tasks.length} 条线路`);
+            u.root.setAttribute(
+              "aria-label",
+              `Ping ${chartMetric === "loss" ? "丢包率" : "延迟"}历史图表，共 ${tasks.length} 条线路`,
+            );
           },
           tooltipHooks.onInit,
         ],
@@ -612,8 +668,9 @@ export function PingChart({
         ],
       },
     };
-    // lossMarkMode 只在这里影响 padding；覆盖层本身走 ref，不需要重建图表。
-  }, [chart, connectNulls, hiddenTasks, hours, isDark, lossMarkMode, taskColors, taskIndexById, taskLabels, tasks, visibleTasks]);
+    // 丢包标记只在这里影响 padding；覆盖层、区间和纵轴都走 ref，不需要重建图表
+    // ——所以 yRange / requestedXRange 不进依赖，否则每次缩放都会销毁重建 uPlot 实例。
+  }, [chart, chartMetric, connectNulls, effectiveLossMarkMode, hiddenTasks, hours, isDark, taskColors, taskIndexById, taskLabels, tasks, visibleTasks]);
 
   const options = useMemo<uPlot.Options | null>(
     () => (baseOptions ? { ...baseOptions, width: w, height: h } : null),
@@ -782,25 +839,47 @@ export function PingChart({
   return (
     <InstancePanel title="Ping 图表" description={coverageLabel ?? undefined}>
       <div className="instance-ping-toolbar">
-        <SwitchToggle
-          label="削峰平滑"
-          active={cutPeak}
-          onToggle={() => setCutPeak((value) => !value)}
-          title="对尖峰值做轻度平滑，仅影响图线显示"
-        />
+        <div className="instance-segmented instance-ping-metric-switch" aria-label="Ping 图表指标">
+          <button
+            type="button"
+            data-active={chartMetric === "latency" ? "true" : "false"}
+            aria-pressed={chartMetric === "latency"}
+            onClick={() => setChartMetric("latency")}
+          >
+            延迟
+          </button>
+          <button
+            type="button"
+            data-active={chartMetric === "loss" ? "true" : "false"}
+            aria-pressed={chartMetric === "loss"}
+            onClick={() => setChartMetric("loss")}
+          >
+            丢包率
+          </button>
+        </div>
+        {chartMetric === "latency" && (
+          <SwitchToggle
+            label="削峰平滑"
+            active={cutPeak}
+            onToggle={() => setCutPeak((value) => !value)}
+            title="对尖峰值做轻度平滑，仅影响图线显示"
+          />
+        )}
         <SwitchToggle
           label="断点连线"
           active={connectNulls}
           onToggle={() => setConnectNulls((value) => !value)}
           title="关闭：如实显示中断/丢包断点；开启：跨过所有空缺连成完整曲线（更好看，但看不出掉线）。注：偶尔漏一两次采样的小空缺始终自动桥接，不受此开关影响。"
         />
-        <CycleToggle
-          label="丢包"
-          options={LOSS_MARK_MODES}
-          value={lossMarkMode}
-          onChange={setLossMarkMode}
-          title="色带：丢包画在图上方的独立横带里，不遮挡曲线；竖线：在丢包时刻直接立一条同色竖线；隐藏：不标记"
-        />
+        {chartMetric === "latency" && (
+          <CycleToggle
+            label="丢包标记"
+            options={LOSS_MARK_MODES}
+            value={lossMarkMode}
+            onChange={setLossMarkMode}
+            title="色带：丢包画在图上方的独立横带里，不遮挡曲线；竖线：在丢包时刻直接立一条同色竖线；隐藏：不标记"
+          />
+        )}
         <CycleToggle
           label="采样"
           options={SAMPLE_TIERS}
@@ -808,19 +887,23 @@ export function PingChart({
           onChange={setSampleTier}
           title="图上保留多少个数据点。全量最细但线更跳，快速最平滑但会吞掉短暂尖峰"
         />
-        <CycleToggle
-          label="纵轴"
-          options={Y_AXIS_MODES}
-          value={yAxisMode}
-          onChange={setYAxisMode}
-          title="从0起：看延迟的绝对量级，线路稳定时就是一条贴底的平线；自适应：放大到实际区间看细节，但正常的小幅抖动也会被放大"
-        />
-        <SwitchToggle
-          label="极值标记"
-          active={showExtremePins}
-          onToggle={() => setShowExtremePins((value) => !value)}
-          title="在每条线当前可见区间的最高/最低点标出数值气泡"
-        />
+        {chartMetric === "latency" && (
+          <CycleToggle
+            label="纵轴"
+            options={Y_AXIS_MODES}
+            value={yAxisMode}
+            onChange={setYAxisMode}
+            title="从0起：看延迟的绝对量级，线路稳定时就是一条贴底的平线；自适应：放大到实际区间看细节，但正常的小幅抖动也会被放大"
+          />
+        )}
+        {chartMetric === "latency" && (
+          <SwitchToggle
+            label="极值标记"
+            active={showExtremePins}
+            onToggle={() => setShowExtremePins((value) => !value)}
+            title="在每条线当前可见区间的最高/最低点标出数值气泡"
+          />
+        )}
         <button type="button" className="instance-toggle-button" onClick={toggleAll}>
           {hiddenTasks.size === 0 ? <EyeOff size={14} aria-hidden /> : <Eye size={14} aria-hidden />}
           {hiddenTasks.size === 0 ? "隐藏全部" : "显示全部"}
@@ -933,7 +1016,7 @@ export function PingChart({
         {chart && options && visibleTasks.length > 0 ? (
           <>
             <UplotReact
-              key={`${uuid}-${hours}-${cutPeak ? "smooth" : "raw"}-${connectNulls ? "span" : "gap"}`}
+              key={`${uuid}-${hours}-${chartMetric}-${cutPeak ? "smooth" : "raw"}-${connectNulls ? "span" : "gap"}`}
               options={options}
               data={chart}
               onCreate={(plot) => {

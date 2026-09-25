@@ -345,7 +345,7 @@ function pingMetricPayload(params: {
   const series = entityIds.flatMap((uuid) => {
     const index = nodes.findIndex((node) => node.uuid === uuid);
     if (index < 0) return [];
-    return tasks.flatMap((task) =>
+    return tasks.filter((task) => task.clients.includes(uuid)).flatMap((task) =>
       metricKeys.map((metricKey) => ({
         metric_key: metricKey,
         entity_id: uuid,
@@ -421,7 +421,8 @@ function loadMetricPayload(params: { metric_keys?: string[]; entity_ids?: string
 }
 
 function pingRecords(uuid?: string, taskId = 1) {
-  const clients = uuid ? [uuid] : nodes.map((node) => node.uuid);
+  const taskClients = pingTasks.find((task) => task.id === taskId)?.clients ?? [];
+  const clients = uuid ? (taskClients.includes(uuid) ? [uuid] : []) : taskClients;
   const now = Date.now();
   return clients.flatMap((client) => {
     const index = nodes.findIndex((node) => node.uuid === client);
@@ -442,11 +443,17 @@ const pingTasks = [
   { id: 1, name: "中国电信", target: "电信探针" },
   { id: 2, name: "中国联通", target: "联通探针" },
   { id: 3, name: "中国移动", target: "移动探针" },
+  {
+    id: 4,
+    name: "KFC-JP",
+    target: "日本探针",
+    clients: nodes[0] ? [nodes[0].uuid] : [],
+  },
 ].map((task, index) => ({
   ...task,
   interval: 60,
   loss: 0,
-  clients: nodes.map((node) => node.uuid),
+  clients: task.clients ?? nodes.map((node) => node.uuid),
   type: "icmp",
   weight: index + 1,
 }));
@@ -542,6 +549,7 @@ export function installDevMockApi() {
           enableHomeSort: true,
           showCostSummary: true,
           showCostSummaryFloatingButton: true,
+          showCostsToGuests: true,
           showOverviewRatings: true,
           showTrafficRating: true,
           showBandwidthRating: true,
@@ -552,12 +560,191 @@ export function installDevMockApi() {
           enableHomepageMultiPing:
             new URLSearchParams(window.location.search).get("multiPing") === "1",
           homepageMultiPingTaskIds: [1, 2, 3],
+          homepageMultiPingNodeTaskIds: {
+            ...(nodes[0] ? { [nodes[0].uuid]: [3, 2, 1] } : {}),
+            ...(nodes[1] ? { [nodes[1].uuid]: [1, 4, 3] } : {}),
+          },
         },
       });
     }
 
     if (url.pathname === "/api/nodes") {
       return json(nodes);
+    }
+
+    if (url.pathname === "/api/admin/ip-info/v1/refresh" && request.method === "POST") {
+      if (!adminMode) return json({ message: "unauthorized" }, { status: 401 });
+      const { uuid, ip } = await request.json() as { uuid: string; ip: string };
+      const query = new URLSearchParams({ uuid, ip });
+      const base = await (await window.fetch(new URL(`/api/public/ip-info/v1/lookup?${query}`, url))).json();
+      const latency = await (await window.fetch(new URL(`/api/public/ip-info/v1/latency?${query}`, url))).json();
+      return json({ ...base, related: { latency } });
+    }
+
+    if (url.pathname === "/api/public/ip-info/v1/status") {
+      return json({
+        ok: true,
+        data: {
+          available: true,
+          version: "0.0.1",
+          schema_version: 5,
+          mainland_china_excluded: true,
+          capabilities: {
+            geo: true,
+            network: true,
+            reputation: false,
+            native_classification: true,
+            global_latency: true,
+            media_unlock: false,
+            ai_unlock: false,
+          },
+        },
+      });
+    }
+
+    if (url.pathname === "/api/public/ip-info/v1/lookup") {
+      const ip = url.searchParams.get("ip") ?? "";
+      const uuid = url.searchParams.get("uuid") ?? "";
+      const family = ip.includes(":") ? 6 : 4;
+      const isTokyo = uuid === "tokyo-edge-01";
+      const updatedAt = new Date(Date.now() - 14 * 60_000).toISOString();
+      return json({
+        ok: true,
+        data: {
+          uuid,
+          schema_version: 5,
+          excluded: false,
+          excluded_reason: null,
+          address: { value: ip, family },
+          location: {
+            continent: "Asia",
+            continent_code: "AS",
+            country: isTokyo ? "Japan" : "Singapore",
+            country_code: isTokyo ? "JP" : "SG",
+            registered_country: isTokyo ? "Japan" : "Singapore",
+            registered_country_code: isTokyo ? "JP" : "SG",
+            region: isTokyo ? "Tokyo" : "Singapore",
+            region_code: null,
+            city: isTokyo ? "Tokyo" : "Singapore",
+            postal_code: null,
+            timezone: isTokyo ? "Asia/Tokyo" : "Asia/Singapore",
+            latitude: isTokyo ? 35.6762 : 1.3521,
+            longitude: isTokyo ? 139.6503 : 103.8198,
+            accuracy_radius: 20,
+          },
+          network: {
+            asn: "AS13335",
+            asn_number: 13335,
+            organization: "Cloudflare, Inc.",
+            operator: "Cloudflare, Inc.",
+            network_type: "hosting",
+            company_type: "hosting",
+            route: family === 6 ? "2001:db8::/32" : "203.0.113.0/24",
+            rir: "APNIC",
+            domain: "cloudflare.com",
+            datacenter: null,
+          },
+          classification: {
+            type: family === 4 ? "broadcast" : "native",
+            label: family === 4 ? "广播 IP (DE)" : "原生 IP",
+            geolocated_country_code: family === 4 ? "SG" : "JP",
+            registered_country_code: family === 4 ? "DE" : "JP",
+            confidence: 96,
+            source: "provider_verdict",
+          },
+          reputation: {
+            available: false,
+            purity_score: null,
+            risk_score: null,
+            pollution_score: null,
+            risk_level: null,
+            pollution_level: null,
+            positive_signal_count: 0,
+            valid_signal_count: 0,
+            signals: {
+              proxy: false,
+              tor: false,
+              vpn: false,
+              datacenter: null,
+              abuser: false,
+              crawler: false,
+            },
+            database_scores: {},
+            database_signals: {},
+            available_sources: [],
+            failed_sources: [],
+            method: { id: "not-exposed", status: "unavailable" },
+          },
+          capabilities: { media_unlock: false, ai_unlock: false },
+          provider: {
+            id: "net-coffee",
+            name: "Net.Coffee",
+            homepage: "https://ip.net.coffee",
+            base_source: "net-coffee",
+            quality_sources: [],
+            security_data_available: false,
+          },
+        },
+        meta: {
+          cache: "hit",
+          stale: false,
+          updated_at: updatedAt,
+          expires_at: new Date(Date.now() + 23 * 60 * 60_000).toISOString(),
+          stale_until: new Date(Date.now() + 7 * 86_400_000).toISOString(),
+          warning: null,
+        },
+      });
+    }
+
+    if (url.pathname === "/api/public/ip-info/v1/latency") {
+      const ip = url.searchParams.get("ip") ?? "";
+      const uuid = url.searchParams.get("uuid") ?? "";
+      const family = ip.includes(":") ? 6 : 4;
+      const updatedAt = new Date(Date.now() - 3 * 60_000).toISOString();
+      return json({
+        ok: true,
+        data: {
+          uuid,
+          schema_version: 5,
+          address: { value: ip, family },
+          classification: {
+            type: family === 4 ? "broadcast" : "native",
+            label: family === 4 ? "广播 IP (DE)" : "原生 IP",
+            geolocated_country_code: family === 4 ? "SG" : "JP",
+            registered_country_code: family === 4 ? "DE" : "JP",
+            confidence: 96,
+            source: "provider_verdict",
+          },
+          latency: {
+            nodes: [
+              { id: "n02", name: "香港", city: "香港", country_code: "HK", latency_ms: 19, status: "ok" },
+              { id: "n03", name: "日本", city: "东京", country_code: "JP", latency_ms: 30, status: "ok" },
+              { id: "n04", name: "新加坡", city: "新加坡", country_code: "SG", latency_ms: 51, status: "ok" },
+              { id: "n09", name: "美西", city: "洛杉矶", country_code: "US", latency_ms: 129, status: "ok" },
+              { id: "n11", name: "加拿大", city: "温哥华", country_code: "CA", latency_ms: 140, status: "ok" },
+              { id: "n13", name: "德国", city: "法兰克福", country_code: "DE", latency_ms: 237, status: "ok" },
+            ],
+            available_count: 6,
+            timeout_count: 0,
+            provider_cached: false,
+          },
+          provider: {
+            id: "net-coffee",
+            name: "Net.Coffee",
+            homepage: "https://ip.net.coffee",
+            classification_available: true,
+            latency_available: true,
+          },
+        },
+        meta: {
+          cache: "hit",
+          stale: false,
+          updated_at: updatedAt,
+          expires_at: new Date(Date.now() + 57 * 60_000).toISOString(),
+          stale_until: new Date(Date.now() + 24 * 60 * 60_000).toISOString(),
+          warning: null,
+        },
+      });
     }
 
     if (url.pathname === "/api/rpc2") {

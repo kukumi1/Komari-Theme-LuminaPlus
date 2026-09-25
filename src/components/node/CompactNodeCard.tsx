@@ -8,7 +8,6 @@ import {
   CircleDollarSign,
   Clock3,
   Cpu,
-  Database,
   Gauge,
   HardDrive,
   MemoryStick,
@@ -38,6 +37,8 @@ import {
 } from "./nodeCardShared";
 import { IpStackBadges } from "./IpStackBadges";
 import { NodeTodayTrafficPopover } from "./NodeTodayTrafficPopover";
+import { TrafficQuotaLabel } from "./TrafficQuotaLabel";
+import type { TrafficResetDisplay } from "@/utils/trafficReset";
 import type {
   NodeInfo,
   NodeMetrics,
@@ -446,6 +447,7 @@ function CompactNodeInfoStrip({
   downRate,
   showTrafficTotal,
   showBilling,
+  showCosts,
   showConnections,
   expire,
   expireColor,
@@ -457,6 +459,7 @@ function CompactNodeInfoStrip({
   downRate: ByteRateDisplay;
   showTrafficTotal: boolean;
   showBilling: boolean;
+  showCosts: boolean;
   showConnections: boolean;
   expire: CompactExpire;
   expireColor: string;
@@ -517,7 +520,7 @@ function CompactNodeInfoStrip({
       )}
       {showBilling && (
         <CompactInfoTile
-          label="费用到期"
+          label={showCosts ? "费用到期" : "到期"}
           color="var(--status-success)"
         >
           <CompactInfoRow
@@ -525,11 +528,13 @@ function CompactNodeInfoStrip({
             value={formatCompactExpire(expire)}
             color={expireColor}
           />
-          <CompactInfoRow
-            icon={<CircleDollarSign size={12} strokeWidth={2.2} />}
-            value={renewalPrice || "未填"}
-            color={renewalPrice ? "var(--status-success)" : "var(--text-tertiary)"}
-          />
+          {showCosts && (
+            <CompactInfoRow
+              icon={<CircleDollarSign size={12} strokeWidth={2.2} />}
+              value={renewalPrice || "未填"}
+              color={renewalPrice ? "var(--status-success)" : "var(--text-tertiary)"}
+            />
+          )}
         </CompactInfoTile>
       )}
       {showConnections && (
@@ -556,9 +561,11 @@ function CompactNodeInfoStrip({
 function CompactTrafficBar({
   traffic,
   uptimeLabel,
+  reset,
 }: {
   traffic: TrafficDisplay;
   uptimeLabel: string;
+  reset: TrafficResetDisplay | null;
 }) {
   // 用量非零但极小时,下限填充"一段的 TRAFFIC_SLIVER_RATIO"(段内一道细边),而不是整段——
   // 否则低用量节点(如 0.01%)会被夸张成快 5.6%。fraction 为 0 时保持全灭。
@@ -578,28 +585,16 @@ function CompactTrafficBar({
       title={`流量 · ${traffic.typeLabel} · ${traffic.detail}${uptimeLabel ? ` · ${uptimeLabel}` : ""}`}
     >
       <div className={clsx("compact-node-traffic-body", uptimeLabel && "has-uptime")}>
-        {uptimeLabel ? (
-          <>
-            <span className="compact-node-traffic-label">
-              <Database size={12} strokeWidth={2.1} />
-              <span>流量</span>
-            </span>
-            <div className="compact-node-gauge-track" aria-hidden />
+        <div className="compact-node-traffic-head">
+          <TrafficQuotaLabel remainingLabel={traffic.remainingLabel} reset={reset} />
+          {uptimeLabel ? (
             <span className="compact-node-traffic-uptime">{uptimeLabel}</span>
-            <span className="compact-node-traffic-value">{traffic.detail}</span>
-          </>
-        ) : (
-          <>
-            <div className="compact-node-traffic-head">
-              <span className="compact-node-traffic-label">
-                <Database size={12} strokeWidth={2.1} />
-                <span>流量</span>
-              </span>
-              <span className="compact-node-traffic-value">{traffic.detail}</span>
-            </div>
-            <div className="compact-node-gauge-track" aria-hidden />
-          </>
-        )}
+          ) : (
+            <span className="traffic-quota-usage">{traffic.detail}</span>
+          )}
+        </div>
+        <div className="compact-node-gauge-track" aria-hidden />
+        {uptimeLabel && <span className="compact-node-traffic-value">{traffic.detail}</span>}
       </div>
     </div>
   );
@@ -666,9 +661,11 @@ const CompactNodeHealth = memo(function CompactNodeHealth({
 export const CompactNodeCard = memo(function CompactNodeCard({
   uuid,
   showTodayTraffic = true,
+  showCosts = true,
 }: {
   uuid: string;
   showTodayTraffic?: boolean;
+  showCosts?: boolean;
 }) {
   const model = useNodeCardModel(uuid, {
     pingBucketCount: HEALTH_BAR_COUNT,
@@ -683,6 +680,7 @@ export const CompactNodeCard = memo(function CompactNodeCard({
   const {
     node,
     traffic,
+    trafficReset,
     trafficTrend,
     ping,
     pingBuckets,
@@ -726,12 +724,13 @@ export const CompactNodeCard = memo(function CompactNodeCard({
         downRate={downRate}
         showTrafficTotal={showTrafficTotal}
         showBilling={showBilling}
+        showCosts={showCosts}
         showConnections={showConnections}
         expire={expire}
         expireColor={expireColor}
         renewalPrice={renewalPrice}
       />
-      <CompactTrafficBar traffic={traffic} uptimeLabel={uptimeLabel} />
+      <CompactTrafficBar traffic={traffic} uptimeLabel={uptimeLabel} reset={trafficReset} />
       {homepagePingLines.length === HOMEPAGE_MULTI_PING_TASK_COUNT ? (
         <MultiPingStatus
           lines={homepagePingLines}

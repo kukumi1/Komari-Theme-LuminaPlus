@@ -3,6 +3,7 @@ import { ArrowDownWideNarrow, ArrowUpNarrowWide } from "lucide-react";
 import {
   HOME_SORT_FIELDS,
   HOME_SORT_FIELD_LABELS,
+  HOME_SORT_NATURAL_DIRECTION,
   type HomeSortDirection,
   type HomeSortField,
 } from "@/utils/homeSort";
@@ -18,8 +19,18 @@ function SortIcon({ direction, size = 14 }: { direction: HomeSortDirection; size
 }
 
 // 选择当前维度会翻转方向，选择其他维度会采用该维度的自然方向。
-export function HomeSortControl({ state }: { state: HomeSortControlState }) {
+export function HomeSortControl({
+  state,
+  showPrice = true,
+}: {
+  state: HomeSortControlState;
+  showPrice?: boolean;
+}) {
   const { field, direction, setField, toggleDirection } = state;
+  const visibleField = !showPrice && field === "price" ? "default" : field;
+  const visibleDirection = !showPrice && field === "price"
+    ? HOME_SORT_NATURAL_DIRECTION.default
+    : direction;
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement | null>(null);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
@@ -57,17 +68,18 @@ export function HomeSortControl({ state }: { state: HomeSortControlState }) {
         aria-haspopup="true"
         aria-expanded={open}
         aria-controls={open ? panelId : undefined}
-        aria-label={`排序方式，当前${HOME_SORT_FIELD_LABELS[field]}${direction === "asc" ? "升序" : "降序"}`}
-        title={`排序：${HOME_SORT_FIELD_LABELS[field]}（${direction === "asc" ? "升序" : "降序"}）`}
+        aria-label={`排序方式，当前${HOME_SORT_FIELD_LABELS[visibleField]}${visibleDirection === "asc" ? "升序" : "降序"}`}
+        title={`排序：${HOME_SORT_FIELD_LABELS[visibleField]}（${visibleDirection === "asc" ? "升序" : "降序"}）`}
         onClick={() => setOpen((value) => !value)}
       >
-        <SortIcon direction={direction} />
-        <span>{HOME_SORT_FIELD_LABELS[field]}</span>
+        <SortIcon direction={visibleDirection} />
+        <span>{HOME_SORT_FIELD_LABELS[visibleField]}</span>
       </button>
       {open && (
         <div id={panelId} className="home-sort-panel" role="group" aria-label="排序方式">
           {HOME_SORT_FIELDS.map((option) => {
-            const active = option === field;
+            if (!showPrice && option === "price") return null;
+            const active = option === visibleField;
             return (
               <button
                 key={option}

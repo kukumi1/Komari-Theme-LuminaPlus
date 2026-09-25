@@ -301,7 +301,7 @@
 
 .compact-node-traffic-head {
   display: flex;
-  grid-column: 1;
+  grid-column: 1 / -1;
   grid-row: 1;
   min-width: 0;
   align-items: baseline;
@@ -324,28 +324,6 @@
       var(--progress-bg) 100%
     ),
     var(--traffic-heat-spectrum);
-}
-
-.compact-node-traffic-label {
-  display: inline-flex;
-  flex: 0 0 auto;
-  align-items: center;
-  gap: 5px;
-  color: var(--text-secondary);
-  font-size: 11px;
-  font-weight: 660;
-  line-height: 1.15;
-}
-
-.compact-node-traffic-label svg {
-  flex: 0 0 auto;
-  color: var(--compact-gauge-color);
-}
-
-.compact-node-traffic-body.has-uptime > .compact-node-traffic-label {
-  grid-column: 1;
-  grid-row: 1;
-  align-self: center;
 }
 
 .compact-node-traffic-uptime {

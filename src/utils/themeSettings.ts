@@ -26,24 +26,46 @@ import {
 } from "@/utils/homeSort";
 import {
   normalizeHomepageMultiPingTaskIds,
+  normalizeHomepageMultiPingNodeTaskIds,
   normalizeHomepagePingTaskBindings,
+  type HomepageMultiPingNodeTaskIds,
   type HomepagePingTaskBindings,
 } from "@/utils/pingTasks";
 
 export type Appearance = "system" | "light" | "dark";
 export type NodeViewMode = "large" | "compact" | "mini" | "list";
 export type BackgroundMediaType = "image" | "video";
+export type AmbientEffect =
+  | "sakura"
+  | "rain"
+  | "snow"
+  | "leaves"
+  | "confetti"
+  | "fireworks";
+
+export const AMBIENT_EFFECTS: readonly AmbientEffect[] = [
+  "sakura",
+  "rain",
+  "snow",
+  "leaves",
+  "confetti",
+  "fireworks",
+];
 
 export interface ResolvedThemeSettings {
   defaultAppearance: Appearance;
   desktopNodeViewMode: NodeViewMode;
   mobileNodeViewMode: NodeViewMode;
   enableAdminButton: boolean;
+  hideAdminEntryWhenLoggedOut: boolean;
   showPingChart: boolean;
   homepagePingBindings: HomepagePingTaskBindings;
   enableHomepageMultiPing: boolean;
   homepageMultiPingTaskIds: number[];
+  homepageMultiPingNodeTaskIds: HomepageMultiPingNodeTaskIds;
   fakePingForUnbound: boolean;
+  enableHomeHeaderAutoHide: boolean;
+  homeHeaderVisibleSeconds: number;
   showHomeOverview: boolean;
   showGroupTabs: boolean;
   showRegionBar: boolean;
@@ -52,6 +74,7 @@ export interface ResolvedThemeSettings {
   enableHomeSort: boolean;
   homeSortField: HomeSortField;
   homeSortDirection: HomeSortDirection;
+  showCostsToGuests: boolean;
   showCostSummary: boolean;
   showCostSummaryFloatingButton: boolean;
   showOverviewRatings: boolean;
@@ -78,6 +101,8 @@ export interface ResolvedThemeSettings {
   backgroundVideoDark: string;
   backgroundAlignment: string;
   surfaceOpacity: number;
+  enableAmbientEffect: boolean;
+  ambientEffect: AmbientEffect;
 }
 
 export const DEFAULT_THEME_SETTINGS: ResolvedThemeSettings = {
@@ -85,11 +110,15 @@ export const DEFAULT_THEME_SETTINGS: ResolvedThemeSettings = {
   desktopNodeViewMode: "large",
   mobileNodeViewMode: "compact",
   enableAdminButton: true,
+  hideAdminEntryWhenLoggedOut: false,
   showPingChart: true,
   homepagePingBindings: {},
   enableHomepageMultiPing: false,
   homepageMultiPingTaskIds: [],
+  homepageMultiPingNodeTaskIds: {},
   fakePingForUnbound: false,
+  enableHomeHeaderAutoHide: false,
+  homeHeaderVisibleSeconds: 10,
   showHomeOverview: true,
   showGroupTabs: true,
   showRegionBar: true,
@@ -98,6 +127,7 @@ export const DEFAULT_THEME_SETTINGS: ResolvedThemeSettings = {
   enableHomeSort: true,
   homeSortField: "default",
   homeSortDirection: HOME_SORT_NATURAL_DIRECTION.default,
+  showCostsToGuests: true,
   showCostSummary: true,
   showCostSummaryFloatingButton: true,
   showOverviewRatings: true,
@@ -124,6 +154,8 @@ export const DEFAULT_THEME_SETTINGS: ResolvedThemeSettings = {
   backgroundVideoDark: "",
   backgroundAlignment: DEFAULT_BACKGROUND_ALIGNMENT,
   surfaceOpacity: DEFAULT_SURFACE_OPACITY,
+  enableAmbientEffect: false,
+  ambientEffect: "sakura",
 };
 
 export function isAppearance(value: unknown): value is Appearance {
@@ -164,12 +196,52 @@ function enabledUnlessFalse(value: unknown) {
   return value !== false;
 }
 
+export function normalizeHomeHeaderVisibleSeconds(value: unknown) {
+  const seconds =
+    typeof value === "number"
+      ? value
+      : typeof value === "string"
+        ? Number.parseFloat(value)
+        : Number.NaN;
+  if (!Number.isFinite(seconds)) return DEFAULT_THEME_SETTINGS.homeHeaderVisibleSeconds;
+  return Math.min(3600, Math.max(1, Math.round(seconds)));
+}
+
+export function shouldShowAdminEntry(
+  settings: Pick<
+    ResolvedThemeSettings,
+    "enableAdminButton" | "hideAdminEntryWhenLoggedOut"
+  >,
+  loggedIn: boolean,
+) {
+  // enableAdminButton 是旧版隐藏字段，继续保留其全局禁用语义；新设置只对未登录访客生效。
+  return (
+    settings.enableAdminButton &&
+    (loggedIn || !settings.hideAdminEntryWhenLoggedOut)
+  );
+}
+
+export function canViewCosts(
+  settings: Pick<ResolvedThemeSettings, "showCostsToGuests">,
+  loggedIn: boolean,
+) {
+  return loggedIn || settings.showCostsToGuests;
+}
+
 function normalizePlainText(value: unknown) {
   return typeof value === "string" ? value : "";
 }
 
 function normalizeBackgroundMediaType(value: unknown): BackgroundMediaType {
   return value === "video" ? "video" : "image";
+}
+
+export function isAmbientEffect(value: unknown): value is AmbientEffect {
+  return typeof value === "string" && AMBIENT_EFFECTS.includes(value as AmbientEffect);
+}
+
+function normalizeAmbientEffect(value: unknown): AmbientEffect {
+  return isAmbientEffect(value) ? value : DEFAULT_THEME_SETTINGS.ambientEffect;
 }
 
 // 管理员默认排序:字段非法回落 default;方向非法时回落该字段的自然方向(文本升、数值降)。
@@ -203,13 +275,22 @@ export function normalizeThemeSettings(
       DEFAULT_THEME_SETTINGS.mobileNodeViewMode,
     ),
     enableAdminButton: enabledUnlessFalse(settings?.enableAdminButton),
+    hideAdminEntryWhenLoggedOut:
+      settings?.hideAdminEntryWhenLoggedOut === true,
     showPingChart: enabledUnlessFalse(settings?.showPingChart),
     homepagePingBindings: normalizeHomepagePingTaskBindings(settings?.homepagePingBindings),
     // 保留开关原值，让管理页能呈现并修复不完整配置；首页消费方仅在任务恰好为三项时启用。
     enableHomepageMultiPing: settings?.enableHomepageMultiPing === true,
     homepageMultiPingTaskIds,
+    homepageMultiPingNodeTaskIds: normalizeHomepageMultiPingNodeTaskIds(
+      settings?.homepageMultiPingNodeTaskIds,
+    ),
     // 默认关闭(需手动开启):给访客展示的是模拟数据,必须由站长显式决定。
     fakePingForUnbound: settings?.fakePingForUnbound === true,
+    enableHomeHeaderAutoHide: settings?.enableHomeHeaderAutoHide === true,
+    homeHeaderVisibleSeconds: normalizeHomeHeaderVisibleSeconds(
+      settings?.homeHeaderVisibleSeconds,
+    ),
     showHomeOverview: enabledUnlessFalse(settings?.showHomeOverview),
     showGroupTabs: enabledUnlessFalse(settings?.showGroupTabs),
     showRegionBar: enabledUnlessFalse(settings?.showRegionBar),
@@ -217,6 +298,8 @@ export function normalizeThemeSettings(
     homeGroupOrder: normalizeHomeGroupOrder(settings?.homeGroupOrder),
     enableHomeSort: enabledUnlessFalse(settings?.enableHomeSort),
     ...normalizeHomeSortDefault(settings?.homeSortField, settings?.homeSortDirection),
+    // 默认公开以保持存量站点升级后的展示行为；站长可显式关闭访客费用展示。
+    showCostsToGuests: enabledUnlessFalse(settings?.showCostsToGuests),
     showCostSummary: enabledUnlessFalse(settings?.showCostSummary),
     showCostSummaryFloatingButton: enabledUnlessFalse(settings?.showCostSummaryFloatingButton),
     showOverviewRatings: enabledUnlessFalse(settings?.showOverviewRatings),
@@ -246,5 +329,8 @@ export function normalizeThemeSettings(
     backgroundVideoDark: normalizeBackgroundVideoUrl(settings?.backgroundVideoDark),
     backgroundAlignment: normalizeBackgroundAlignment(settings?.backgroundAlignment),
     surfaceOpacity: normalizeSurfaceOpacity(settings?.surfaceOpacity),
+    // 环境动效默认关闭；保存的预设仍会保留，方便站长关闭后再次开启。
+    enableAmbientEffect: settings?.enableAmbientEffect === true,
+    ambientEffect: normalizeAmbientEffect(settings?.ambientEffect),
   };
 }
